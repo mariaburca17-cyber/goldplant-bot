@@ -51,16 +51,52 @@ app = FastAPI()
 async def startup_event():
     """
     Esta función se ejecuta automáticamente cuando el servidor FastAPI está a punto de iniciar.
-    Es el lugar perfecto para inicializar recursos como la base de datos.
+    Es el lugar perfecto para inicializar recursos como la base de datos y el bot.
     """
-    print("Iniciando evento de startup de FastAPI...")
-    await init_db()
-    print("Evento de startup completado.")
+    global bot, dp, db_pool # Declara que vas a modificar las globales
 
-# El resto de tu código va aquí...
-# (la función set_webhook, el endpoint telegram_webhook, etc.)
-# Lista de IPs de NowPayments (puedes encontrar la lista actualizada en su documentación)
-NOWPAYMENTS_IPS = ["138.201.94.222", "138.201.94.221", "138.201.94.220"]
+    print("Iniciando evento de startup de FastAPI...")
+
+    # 1. Inicializar la base de datos PRIMERO
+    await init_db()
+    print("Base de datos PostgreSQL inicializada correctamente.")
+
+    # 2. Inicializar el bot de Telegram
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher(storage=MemoryStorage())
+    print("Bot de Telegram inicializado.")
+
+    # 3. Registrar todos los handlers y middleware del bot
+    # (Mueve todo el registro de handlers aquí para que se hagan sobre el dp correcto)
+    dp.message.middleware(BlockedMiddleware())
+    dp.message(Command("start"))(cmd_start)
+    dp.message(F.text == "📋 Menú Principal 📋", StateFilter(None))(main_menu)
+    dp.message(F.text == "⚙️Menu⚙️", StateFilter(None))(more_options)
+    dp.message(F.text == "🧑‍🤝‍🧑 Referidos")(show_referrals)
+    dp.message(F.text == "ℹ️ información")(about_goldplant)
+    dp.message(F.text == "📊 Historial")(show_history)
+    dp.message(F.text == "↩️ Volver al Menú Principal")(back_to_main_menu)
+    dp.message(F.text == "↩️ Volver a Más Opciones")(back_to_more_options)
+    dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))(process_buy_callback)
+    dp.message(F.text == "❌ Cancelar", StateFilter(None))(cmd_cancel)
+    dp.message(WithdrawState.waiting_for_add_balance_amount)(process_add_balance_amount)
+    dp.message(F.text.startswith('/') == False, StateFilter(None))(handle_menu)
+    dp.message(WithdrawState.waiting_for_card)(process_card)
+    dp.message(WithdrawState.waiting_for_name)(process_name)
+    dp.message(F.text == "❌ Cancelar Retiro")(cancel_withdraw)
+    dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))(admin_approve_withdraw)
+    dp.callback_query(lambda c: c.data and c.data.startswith("reject_"))(admin_reject_withdraw)
+    dp.message(WithdrawState.waiting_for_rejection_reason)(process_rejection_reason)
+    dp.message(Command("block"))(cmd_block_user)
+    dp.message(Command("unblock"))(cmd_unblock_user)
+    dp.message(Command("add"))(cmd_add_balance)
+    print("Handlers de aiogram registrados.")
+
+    # 4. Configurar el webhook de Telegram
+    await set_webhook()
+    print("Webhook de Telegram configurado.")
+
+    print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
 
 @app.post("/nowpayments_webhook")
 async def nowpayments_webhook(request: Request):
@@ -1259,19 +1295,13 @@ async def cmd_add_balance(message: types.Message):
 
 # --- FUNCIÓN PRINCIPAL CORREGIDA ---
 async def main():
-    print("🚀 ESTA ES LA VERSIÓN CORRECTA DEL CÓDIGO - INICIANDO SERVIDOR WEB")
-    # 1. Inicializa la base de datos
-    
-    # 2. Configura el webhook de Telegram para que nos envíe los mensajes aquí
-    await set_webhook()
-    
-    # 3. Inicia el servidor web FastAPI
-    # Render se encargará de mantenerlo funcionando.
-    # Este servidor ahora atenderá tanto los webhooks de Telegram como los de NowPayments.
+    print("🚀 INICIANDO SERVIDOR WEB")
+    # La inicialización ahora se maneja en el evento 'startup' de FastAPI.
+    # Esta función solo se encarga de iniciar el servidor.
     config = uvicorn.Config(
-        app,  # Tu aplicación FastAPI
-        host="0.0.0.0",  # Necesario para que sea accesible desde internet
-        port=int(os.getenv("PORT", 10000)),  # Usa el puerto que Render te da
+        app, # Tu aplicación FastAPI
+        host="0.0.0.0", # Necesario para que sea accesible desde internet
+        port=int(os.getenv("PORT", 10000)), # Usa el puerto que Render te da
         log_level="info"
     )
     server = uvicorn.Server(config)
