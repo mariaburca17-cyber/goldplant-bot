@@ -21,7 +21,7 @@ from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 # --- 1. CONFIGURACIÓN ---
@@ -57,7 +57,6 @@ class StripUserAgentForNowPayments(BaseHTTPMiddleware):
 
 # --- FASTAPI APP ---
 app = FastAPI()
-app.add_middleware(StripUserAgentForNowPayments)
 
 # --- EVENTOS DE LA APLICACIÓN FASTAPI ---
 @app.on_event("startup")
@@ -118,7 +117,7 @@ class StripUserAgentForNowPayments(BaseHTTPMiddleware):
         response = await call_next(request)
         return response
 
-@app.post("/nowpayments_webhook")
+@app.post("/nowpayments/webhook") 
 async def nowpayments_webhook(request: Request):
     # ... (el resto de tu función de webhook sigue igual)
     received_signature = request.headers.get("x-nowpayments-sig")
