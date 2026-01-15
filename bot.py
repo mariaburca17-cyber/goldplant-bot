@@ -46,6 +46,19 @@ db_pool = None
 # --- FASTAPI APP ---
 app = FastAPI()
 
+# --- EVENTOS DE LA APLICACIÓN FASTAPI ---
+@app.on_event("startup")
+async def startup_event():
+    """
+    Esta función se ejecuta automáticamente cuando el servidor FastAPI está a punto de iniciar.
+    Es el lugar perfecto para inicializar recursos como la base de datos.
+    """
+    print("Iniciando evento de startup de FastAPI...")
+    await init_db()
+    print("Evento de startup completado.")
+
+# El resto de tu código va aquí...
+# (la función set_webhook, el endpoint telegram_webhook, etc.)
 # Lista de IPs de NowPayments (puedes encontrar la lista actualizada en su documentación)
 NOWPAYMENTS_IPS = ["138.201.94.222", "138.201.94.221", "138.201.94.220"]
 
@@ -389,14 +402,13 @@ async def is_user_blocked(user_id: int) -> bool:
 
 # --- FUNCIÓN PARA ESTABLECER EL WEBHOOK ---
 async def set_webhook():
-    """
-    Le dice a Telegram que nos envíe los mensajes a nuestra URL en Render.
-    Esto solo se ejecuta una vez cuando el bot se inicia.
-    """
+    """ Le dice a Telegram que nos envíe los mensajes a nuestra URL en Render. """
     # La URL de Render más una ruta segura con el token del bot
     webhook_path = f"/webhook/{BOT_TOKEN}"
     webhook_url = f"{os.getenv('WEBHOOK_URL')}{webhook_path}"
-    
+
+    print(f"Intentando configurar el webhook en: {webhook_url}")
+
     # Borra cualquier configuración anterior para evitar errores
     await bot.delete_webhook(drop_pending_updates=True)
     
@@ -405,7 +417,8 @@ async def set_webhook():
         url=webhook_url,
         allowed_updates=["message", "callback_query"]
     )
-    print(f"✅ Webhook de Telegram configurado en: {webhook_url}")
+    
+    print(f"✅ Webhook de Telegram configurado correctamente en: {webhook_url}")
 
 # --- NUEVO ENDPOINT PARA EL WEBHOOK DE TELEGRAM ---
 @app.post("/webhook/{bot_token}")
@@ -419,10 +432,13 @@ async def telegram_webhook(request: Request, bot_token: str):
 
     # 2. Recibe el mensaje de Telegram
     update_data = await request.json()
-    
+
     # 3. Le pasa el mensaje a aiogram para que lo procese como siempre
+    # --- CORRECCIÓN DEFINITIVA ---
+    # El dispatcher necesita la instancia del bot para procesar la actualización.
+    # La pasamos como primer argumento.
     update = types.Update.model_validate(update_data, context={"bot": bot})
-    await dp.feed_update(update=update)
+    await dp.feed_update(bot=bot, update=update)
     
     return {"status": "ok"}
 
@@ -1245,7 +1261,6 @@ async def cmd_add_balance(message: types.Message):
 async def main():
     print("🚀 ESTA ES LA VERSIÓN CORRECTA DEL CÓDIGO - INICIANDO SERVIDOR WEB")
     # 1. Inicializa la base de datos
-    await init_db()
     
     # 2. Configura el webhook de Telegram para que nos envíe los mensajes aquí
     await set_webhook()
