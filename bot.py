@@ -22,31 +22,32 @@ from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import Response # Añadido para el webhook de NOWPayments
 
 # --- 1. CONFIGURACIÓN ---
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_URL = os.getenv("DB_URL")
-NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-NOWPAYMENTS_IPS = ["127.0.0.1"] # En producción, usa las IPs reales de NOWPayments
+
+NOWPAYMENTS_IPS = ["127.0.0.1"]
 IPN_SECRET_KEY = os.getenv("NOWPAYMENTS_IPN_KEY")
 
 if not BOT_TOKEN:
     print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
     sys.exit()
+
 if not DB_URL:
     print("ERROR CRÍTICO: No se encontró la DB_URL")
     sys.exit()
 
-ADMIN_ID = 7430692266 # Tu ID de Telegram
+ADMIN_ID = 7430692266  # Tu ID de Telegram
+
 logging.basicConfig(level=logging.INFO)
 
-# Variables globales para el pool de conexiones y el bot
+# Variable global para el pool de conexiones
 db_pool = None
-bot = None
-dp = None
 
 # --- FASTAPI APP ---
 app = FastAPI()
@@ -54,26 +55,26 @@ app = FastAPI()
 # --- EVENTOS DE LA APLICACIÓN FASTAPI ---
 @app.on_event("startup")
 async def startup_event():
-    """Esta función se ejecuta cuando el servidor FastAPI inicia."""
-    global bot, dp, db_pool # Declara que modificarás las globales
+    """
+    Esta función se ejecuta automáticamente cuando el servidor FastAPI está a punto de iniciar.
+    Es el lugar perfecto para inicializar recursos como la base de datos y el bot.
+    """
+    global bot, dp, db_pool # Declara que vas a modificar las globales
+
     print("Iniciando evento de startup de FastAPI...")
 
     # 1. Inicializar la base de datos PRIMERO
     await init_db()
     print("Base de datos PostgreSQL inicializada correctamente.")
 
-    # 2. Inicializar el bot de Telegram y el Dispatcher
+    # 2. Inicializar el bot de Telegram
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
-    print("Bot de Telegram y Dispatcher inicializados.")
+    print("Bot de Telegram inicializado.")
 
-    # 3. Registrar todos los handlers y middleware del bot AQUÍ
-    print("Registrando handlers de aiogram...")
-    
-    # Middleware
+    # 3. Registrar todos los handlers y middleware del bot
+    # (Mueve todo el registro de handlers aquí para que se hagan sobre el dp correcto)
     dp.message.middleware(BlockedMiddleware())
-
-    # Comandos y mensajes de texto
     dp.message(Command("start"))(cmd_start)
     dp.message(F.text == "📋 Menú Principal 📋", StateFilter(None))(main_menu)
     dp.message(F.text == "⚙️Menu⚙️", StateFilter(None))(more_options)
@@ -82,45 +83,61 @@ async def startup_event():
     dp.message(F.text == "📊 Historial")(show_history)
     dp.message(F.text == "↩️ Volver al Menú Principal")(back_to_main_menu)
     dp.message(F.text == "↩️ Volver a Más Opciones")(back_to_more_options)
+    dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))(process_buy_callback)
     dp.message(F.text == "❌ Cancelar", StateFilter(None))(cmd_cancel)
     dp.message(WithdrawState.waiting_for_add_balance_amount)(process_add_balance_amount)
     dp.message(F.text.startswith('/') == False, StateFilter(None))(handle_menu)
     dp.message(WithdrawState.waiting_for_card)(process_card)
     dp.message(WithdrawState.waiting_for_name)(process_name)
     dp.message(F.text == "❌ Cancelar Retiro")(cancel_withdraw)
+    dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))(admin_approve_withdraw)
+    dp.callback_query(lambda c: c.data and c.data.startswith("reject_"))(admin_reject_withdraw)
     dp.message(WithdrawState.waiting_for_rejection_reason)(process_rejection_reason)
-
-    # Comandos de admin
     dp.message(Command("block"))(cmd_block_user)
     dp.message(Command("unblock"))(cmd_unblock_user)
     dp.message(Command("add"))(cmd_add_balance)
-
-    # Callback Queries
-    dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))(process_buy_callback)
-    dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))(admin_approve_withdraw)
-    dp.callback_query(lambda c: c.data and c.data.startswith("reject_"))(admin_reject_withdraw)
-
     print("Handlers de aiogram registrados.")
 
     # 4. Configurar el webhook de Telegram
     await set_webhook()
     print("Webhook de Telegram configurado.")
+
     print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
 
+# ... (imports y código anterior)
 
-# --- WEBHOOK DE NOWPAYMENTS ---
-# Esta sub-aplicación es una buena práctica para separar lógica
-webhook_app = FastAPI()
+# --- Middleware final corregido para el Webhook de NOWPayments ---
+@app.middleware("http")
+async def strip_user_agent_for_nowpayments(request: Request, call_next):
+    # Comprueba si la petición es para nuestro webhook específico
+    if request.url.path == "/nowpayments_webhook":
+        # Crea una copia mutable de las cabeceras
+        mutable_headers = request.headers.mutablecopy()
+        # Elimina la cabecera User-Agent para evitar bloqueos.
+        # Usamos un bucle por si hay mayúsculas/minúsculas (ej. User-Agent vs user-agent)
+        keys_to_delete = [key for key in mutable_headers.keys() if key.lower() == "user-agent"]
+        for key in keys_to_delete:
+            del mutable_headers[key]
+        
+        # Reconstruye el scope de la petición con las nuevas cabeceras
+        new_scope = {**request.scope, "headers": mutable_headers.raw}
+        # Crea un nuevo objeto Request con el scope modificado
+        request = Request(new_scope)
 
-@webhook_app.post("/nowpayments_webhook")
+    # Continúa con el siguiente middleware o la ruta final
+    response = await call_next(request)
+    return response
+
+
+@app.post("/nowpayments_webhook")
 async def nowpayments_webhook(request: Request):
-    global bot # Asegúrate de usar la instancia global del bot
-
+    # ... (el resto de tu función de webhook sigue igual)
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
     body = await request.body()
+
     ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
@@ -130,9 +147,13 @@ async def nowpayments_webhook(request: Request):
         payment_data = json.loads(body_str)
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
         sorted_body_bytes = sorted_body_str.encode('utf-8')
+
         calculated_signature = hmac.new(
-            ipn_secret.encode('utf-8'), sorted_body_bytes, hashlib.sha256
+            ipn_secret.encode('utf-8'),
+            sorted_body_bytes,
+            hashlib.sha256
         ).hexdigest()
+
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
 
@@ -149,40 +170,40 @@ async def nowpayments_webhook(request: Request):
         order_id = payment_data.get("order_id")
         user_id = order_id.split('_')[0]
         amount_paid = payment_data.get("actually_paid")
+
         print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
 
         async def update_user_balance_in_db(user_id, amount):
             global db_pool
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id
+                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                    amount, user_id
                 )
-            print(f"Balance actualizado para el usuario {user_id}: +\${amount}")
+                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
 
         await update_user_balance_in_db(int(user_id), float(amount_paid))
 
         try:
             await bot.send_message(
                 int(user_id),
-                f"✅ ¡Pago recibido!\n\nSe han añadido \${amount_paid:.2f} a tu balance. Gracias por tu recarga."
+                f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
             )
         except Exception as e:
             print(f"No se pudo notificar al usuario {user_id}: {e}")
-    
-    # Siempre devuelve un 200 a NOWPayments para que no reenvíe
+
     return Response(status_code=200)
 
-# Montar la sub-aplicación del webhook en la aplicación principal
-app.mount("/webhook", webhook_app)
-
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
+
 async def init_db():
     """Inicializa la conexión y crea las tablas si no existen."""
     global db_pool
     try:
+        # Crear el pool de conexiones
         db_pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=50)
         async with db_pool.acquire() as conn:
-            # Tabla users
+            # Tabla users (CORREGIDA)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -193,9 +214,10 @@ async def init_db():
                     last_watered TIMESTAMP,
                     card_number TEXT,
                     full_name TEXT,
-                    is_blocked BOOLEAN DEFAULT FALSE
+                    is_blocked BOOLEAN DEFAULT FALSE -- <-- AÑADE ESTA LÍNEA
                 )
             ''')
+            
             # Tabla trees
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS trees (
@@ -208,6 +230,7 @@ async def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             ''')
+            
             # Tabla withdrawals
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS withdrawals (
@@ -223,35 +246,45 @@ async def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             ''')
-        print("Tablas de base de datos verificadas/creadas.")
+            
+        print("Base de datos PostgreSQL inicializada correctamente.")
     except Exception as e:
-        print(f"Error al inicializar la base de datos: {e}")
-        raise
+        print(f"Error DB: {e}")
 
-# --- 3. FUNCIONES AUXILIARES (ASYNC) ---
 async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
+    """
+    Crea una factura en NowPayments y devuelve la URL de pago.
+    """
+    # Creamos un order_id único para rastrear el pago
     order_id = f"{user_id}_{int(datetime.now().timestamp())}"
+    
     invoice_data = {
         "price_amount": amount,
-        "price_currency": "USD",
+        "price_currency": "USD",  # Moneda en la que quieres recibir
         "order_id": order_id,
-        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/webhook/nowpayments_webhook",
+        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments_webhook", # Usa la variable de entorno
         "order_description": f"Recarga de saldo para el usuario {user_id}",
-        "success_url": "https://t.me/Goldplant_bot",
-        "cancel_url": "https://t.me/Goldplant_bot"
+        "success_url": "https://t.me/Goldplant_bot", # Opcional: a dónde redirige tras pagar
+        "cancel_url": "https://t.me/Goldplant_bot"   # Opcional: a dónde redirige si cancela
     }
+
     headers = {
         "x-api-key": os.getenv("NOWPAYMENTS_API_KEY"),
         "Content-Type": "application/json"
     }
+
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
-                "https://api.nowpayments.io/v1/invoice", json=invoice_data, headers=headers
+                "https://api.nowpayments.io/v1/invoice",
+                json=invoice_data,
+                headers=headers
             )
-            response.raise_for_status()
+            response.raise_for_status()  # Lanza un error si la petición falló (código 4xx o 5xx)
+            
             result = response.json()
             return result["invoice_url"]
+
         except httpx.HTTPStatusError as e:
             print(f"Error HTTP al crear factura: {e.response.status_code} - {e.response.text}")
             raise Exception(f"Error al contactar NowPayments: {e.response.status_code}")
@@ -259,6 +292,7 @@ async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
             print(f"Error inesperado al crear factura: {e}")
             raise Exception(f"No se pudo generar la factura de pago.")
 
+# --- 3. FUNCIONES AUXILIARES (ASYNC) ---
 async def send_long_message(message: types.Message, text: str, parse_mode="HTML"):
     MAX_LENGTH = 4096
     for i in range(0, len(text), MAX_LENGTH):
@@ -267,53 +301,75 @@ async def send_long_message(message: types.Message, text: str, parse_mode="HTML"
 async def get_user_data(user_id):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow(
-            "SELECT balance, total_invested, last_watered, referred_by, card_number, full_name FROM users WHERE user_id = \$1",
+            "SELECT balance, total_invested, last_watered, referred_by, card_number, full_name FROM users WHERE user_id = $1",
             user_id
         )
 
 async def register_user_if_new(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
+        # Usamos INSERT ... ON CONFLICT para evitar race conditions o errores de duplicados
+        # PostgreSQL no tiene "IF NOT EXISTS" en INSERT directo, pero ON CONFLICT DO NOTHING simula esto.
+        # Sin embargo, necesitamos saber si era nuevo. Hacemos una query primero o comprobamos filas afectadas.
+        # Estrategia: Intentar insertar, si error de duplicado, ignorar.
+        
         try:
             await conn.execute(
-                "INSERT INTO users (user_id, username, referred_by) VALUES ($1, $2, \$3)",
+                "INSERT INTO users (user_id, username, referred_by) VALUES ($1, $2, $3)",
                 user_id, username, referrer_id
             )
             return True
         except asyncpg.UniqueViolationError:
+            # El usuario ya existe
             return False
 
 async def update_last_watered(user_id):
     now = datetime.now()
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "UPDATE users SET last_watered = $1 WHERE user_id = $2", now, user_id
+            "UPDATE users SET last_watered = $1 WHERE user_id = $2",
+            now, user_id
         )
 
 async def check_pending_withdrawals(user_id):
     async with db_pool.acquire() as conn:
         result = await conn.fetchval(
-            "SELECT id FROM withdrawals WHERE user_id = \$1 AND status = 'pending'", user_id
+            "SELECT id FROM withdrawals WHERE user_id = $1 AND status = 'pending'", 
+            user_id
         )
         return result is not None
 
 async def claim_tree_earnings(user_id: int) -> float:
+    """
+    Calcula las ganancias de un usuario desde su último riego, las añade a su balance
+    en la base de datos y reinicia el contador de riego.
+    Devuelve la cantidad de dinero ganada.
+    """
     async with db_pool.acquire() as conn:
-        user_data = await conn.fetchrow("SELECT last_watered FROM users WHERE user_id = \$1", user_id)
-        if not user_data or not user_data["last_watered"]:
+        # Obtener fecha de último riego y los árboles
+        user_data = await conn.fetchrow("SELECT last_watered FROM users WHERE user_id = $1", user_id)
+        if not user_data:
             return 0.0
-        
-        trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = \$1", user_id)
+
+        trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = $1", user_id)
         if not trees:
             return 0.0
 
-        now = datetime.now()
-        elapsed_seconds = min((now - user_data["last_watered"]).total_seconds(), 86400)
-        total_earnings = sum(float(tree["daily_return"]) * (elapsed_seconds / 86400) for tree in trees)
+        last_watered = user_data["last_watered"]
+        if not last_watered:
+            return 0.0
 
+        # Calcular ganancias (máximo 24h)
+        now = datetime.now()
+        elapsed_seconds = min((now - last_watered).total_seconds(), 86400)
+        total_earnings = 0.0
+        for tree in trees:
+            total_earnings += float(tree["daily_return"]) * (elapsed_seconds / 86400)
+
+        # Si hay ganancias, actualizar balance y fecha de riego
         if total_earnings > 0:
             async with conn.transaction():
                 await conn.execute(
-                    "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = \$3",
+                    "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = $3",
                     total_earnings, now, user_id
                 )
         return total_earnings
@@ -330,6 +386,7 @@ class WithdrawState(StatesGroup):
     waiting_for_add_balance_amount = State()
 
 # --- 5. LÓGICA DEL BOT ---
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -337,40 +394,20 @@ class BlockedMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data: dict):
         if isinstance(event, Message):
             user_id = event.from_user.id
-            if user_id == ADMIN_ID:
+            if user_id == ADMIN_ID:  # Admin nunca se bloquea
                 return await handler(event, data)
+
             async with db_pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT is_blocked FROM users WHERE user_id = \$1", user_id)
+                row = await conn.fetchrow(
+                    "SELECT is_blocked FROM users WHERE user_id = $1",
+                    user_id
+                )
                 if row and row["is_blocked"]:
                     await event.answer("❌ Estás bloqueado y no puedes usar el bot.")
-                    return
+                    return  # bloquea sin llamar al handler
+
         return await handler(event, data)
 
-# --- FUNCIÓN PARA ESTABLECER EL WEBHOOK ---
-async def set_webhook():
-    global bot
-    webhook_path = f"/webhook/{BOT_TOKEN}"
-    webhook_url = f"{os.getenv('WEBHOOK_URL')}{webhook_path}"
-    print(f"Intentando configurar el webhook en: {webhook_url}")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(
-        url=webhook_url,
-        allowed_updates=["message", "callback_query"]
-    )
-    print(f"✅ Webhook de Telegram configurado correctamente en: {webhook_url}")
-
-# --- NUEVO ENDPOINT PARA EL WEBHOOK DE TELEGRAM ---
-@app.post("/webhook/{bot_token}")
-async def telegram_webhook(request: Request, bot_token: str):
-    global bot, dp
-    if bot_token != BOT_TOKEN:
-        return {"status": "error", "message": "Token inválido"}, 403
-    
-    update_data = await request.json()
-    update = types.Update.model_validate(update_data, context={"bot": bot})
-    await dp.feed_update(bot=bot, update=update)
-    return {"status": "ok"}
-    
 # Registrar middleware
 dp.message.middleware(BlockedMiddleware())
 @dp.message(Command("block"))
