@@ -28,6 +28,8 @@ DB_URL = os.getenv("DB_URL")
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
+NOWPAYMENTS_IPS = ["127.0.0.1"]
+
 if not BOT_TOKEN:
     print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
     sys.exit()
@@ -165,9 +167,8 @@ async def init_db():
     try:
         # Crear el pool de conexiones
         db_pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=50)
-        
         async with db_pool.acquire() as conn:
-            # Tabla users
+            # Tabla users (CORREGIDA)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -177,7 +178,8 @@ async def init_db():
                     referred_by BIGINT,
                     last_watered TIMESTAMP,
                     card_number TEXT,
-                    full_name TEXT
+                    full_name TEXT,
+                    is_blocked BOOLEAN DEFAULT FALSE -- <-- AÑADE ESTA LÍNEA
                 )
             ''')
             
