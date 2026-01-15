@@ -20,7 +20,7 @@ from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 
 # --- 1. CONFIGURACIÓN ---
 load_dotenv()
