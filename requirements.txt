@@ -5,3 +5,4 @@ asyncpg==0.28.0
 pydantic==2.1.1
 aiohttp>=3.8.5,<3.9
 python-dotenv
+httpx
