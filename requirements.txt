@@ -1,6 +1,7 @@
 fastapi==0.95.0
-aiogram==2.24.0
+aiogram==3.0.0
 uvicorn==0.23.2
 asyncpg==0.28.0
 pydantic==1.10.26
+aiohttp==3.8.0
 
