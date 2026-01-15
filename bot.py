@@ -3,6 +3,9 @@ import asyncpg
 import logging
 import os
 import sys
+import aiohttp
+import uvicorn
+import httpx
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -15,12 +18,15 @@ from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
+from fastapi import FastAPI, Request
 
 # --- 1. CONFIGURACIÓN ---
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_URL = os.getenv("DB_URL")
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
     print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
@@ -36,6 +42,71 @@ logging.basicConfig(level=logging.INFO)
 
 # Variable global para el pool de conexiones
 db_pool = None
+
+# --- FASTAPI APP ---
+app = FastAPI()
+
+# Lista de IPs de NowPayments (puedes encontrar la lista actualizada en su documentación)
+NOWPAYMENTS_IPS = ["138.201.94.222", "138.201.94.221", "138.201.94.220"]
+
+@app.post("/nowpayments_webhook")
+async def nowpayments_webhook(request: Request):
+    # 1. Verificar IP (opcional pero recomendado)
+    client_ip = request.client.host
+    if client_ip not in NOWPAYMENTS_IPS:
+        print(f"Webhook llamado desde una IP no autorizada: {client_ip}")
+        return {"status": "error", "message": "Unauthorized IP"}, 403
+
+    # 2. Obtener y validar los datos
+    data = await request.json()
+    print("Webhook recibido de NowPayments:", data)
+
+    # Validar que el estado es 'finished' o 'confirmed' (a veces llegan como 'confirmed')
+    payment_status = data.get("payment_status")
+    if payment_status not in ["finished", "confirmed"]:
+        print(f"Estado de pago no final: {payment_status}. No se procesa.")
+        return {"status": "ok"}  # Responde con 200 para no reenvíos
+
+    # 3. Procesar el pago
+    try:
+        # El order_id lo creamos como "user_id_timestamp"
+        order_id = data.get("order_id")
+        if not order_id or "_" not in order_id:
+            raise ValueError("order_id inválido")
+
+        user_id = int(order_id.split("_")[0])
+        amount = float(data.get("price_amount", 0))
+        pay_currency = data.get("pay_currency")
+        actually_paid = float(data.get("actually_paid", 0))
+
+        print(f"Procesando pago: User {user_id}, Amount {amount} {pay_currency}, Paid {actually_paid}")
+
+        # Opcional: Verificar que el monto pagado es correcto (para evitar fraudes)
+        # if actually_paid < amount:
+        #     print(f"Pago incompleto para el usuario {user_id}. Monto esperado: {amount}, Pagado: {actually_paid}")
+        #     await bot.send_message(user_id, f"⚠️ Tu pago parece estar incompleto. Por favor, contacta con soporte.")
+        #     return {"status": "ok"}
+
+        # 4. Actualizar el balance del usuario
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                amount,
+                user_id
+            )
+
+        # 5. Notificar al usuario
+        await bot.send_message(
+            user_id,
+            f"✅ ¡Pago de ${amount:.2f} confirmado! Tu balance ha sido actualizado."
+        )
+
+        return {"status": "success"}
+
+    except Exception as e:
+        print(f"Error procesando webhook: {e}")
+        # Devolver un error 500 para que NowPayments pueda reintentar más tarde
+        return {"status": "error", "message": str(e)}, 500
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 
@@ -93,6 +164,47 @@ async def init_db():
         print("Base de datos PostgreSQL inicializada correctamente.")
     except Exception as e:
         print(f"Error DB: {e}")
+
+async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
+    """
+    Crea una factura en NowPayments y devuelve la URL de pago.
+    """
+    # Creamos un order_id único para rastrear el pago
+    order_id = f"{user_id}_{int(datetime.now().timestamp())}"
+    
+    invoice_data = {
+        "price_amount": amount,
+        "price_currency": "USD",  # Moneda en la que quieres recibir
+        "order_id": order_id,
+        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments_webhook", # Usa la variable de entorno
+        "order_description": f"Recarga de saldo para el usuario {user_id}",
+        "success_url": "https://t.me/Goldplant_bot", # Opcional: a dónde redirige tras pagar
+        "cancel_url": "https://t.me/Goldplant_bot"   # Opcional: a dónde redirige si cancela
+    }
+
+    headers = {
+        "x-api-key": os.getenv("NOWPAYMENTS_API_KEY"),
+        "Content-Type": "application/json"
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                "https://api.nowpayments.io/v1/invoice",
+                json=invoice_data,
+                headers=headers
+            )
+            response.raise_for_status()  # Lanza un error si la petición falló (código 4xx o 5xx)
+            
+            result = response.json()
+            return result["invoice_url"]
+
+        except httpx.HTTPStatusError as e:
+            print(f"Error HTTP al crear factura: {e.response.status_code} - {e.response.text}")
+            raise Exception(f"Error al contactar NowPayments: {e.response.status_code}")
+        except Exception as e:
+            print(f"Error inesperado al crear factura: {e}")
+            raise Exception(f"No se pudo generar la factura de pago.")
 
 # --- 3. FUNCIONES AUXILIARES (ASYNC) ---
 async def send_long_message(message: types.Message, text: str, parse_mode="HTML"):
@@ -185,6 +297,7 @@ class WithdrawState(StatesGroup):
     waiting_for_card = State()
     waiting_for_name = State()
     waiting_for_rejection_reason = State()
+    waiting_for_add_balance_amount = State()
 
 # --- 5. LÓGICA DEL BOT ---
 
@@ -274,6 +387,45 @@ async def is_user_blocked(user_id: int) -> bool:
         row = await conn.fetchrow("SELECT is_blocked FROM users WHERE user_id = $1", user_id)
         return row and row['is_blocked']
 
+# --- FUNCIÓN PARA ESTABLECER EL WEBHOOK ---
+async def set_webhook():
+    """
+    Le dice a Telegram que nos envíe los mensajes a nuestra URL en Render.
+    Esto solo se ejecuta una vez cuando el bot se inicia.
+    """
+    # La URL de Render más una ruta segura con el token del bot
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    webhook_url = f"{os.getenv('WEBHOOK_URL')}{webhook_path}"
+    
+    # Borra cualquier configuración anterior para evitar errores
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Establece la nueva dirección
+    await bot.set_webhook(
+        url=webhook_url,
+        allowed_updates=["message", "callback_query"]
+    )
+    print(f"✅ Webhook de Telegram configurado en: {webhook_url}")
+
+# --- NUEVO ENDPOINT PARA EL WEBHOOK DE TELEGRAM ---
+@app.post("/webhook/{bot_token}")
+async def telegram_webhook(request: Request, bot_token: str):
+    """
+    Esta es la puerta de entrada de los mensajes de Telegram en tu servidor.
+    """
+    # 1. Seguridad: verifica que el token sea el correcto
+    if bot_token != BOT_TOKEN:
+        return {"status": "error", "message": "Token inválido"}, 403
+
+    # 2. Recibe el mensaje de Telegram
+    update_data = await request.json()
+    
+    # 3. Le pasa el mensaje a aiogram para que lo procese como siempre
+    update = types.Update.model_validate(update_data, context={"bot": bot})
+    await dp.feed_update(update=update)
+    
+    return {"status": "ok"}
+
 # --- HANDLER GLOBAL PARA USUARIOS ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -290,11 +442,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
     # Botón de menú principal al iniciar
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="💰Comprar💰"), types.KeyboardButton(text="💸Retirar💸")],
+            [types.KeyboardButton(text="💳Añadir Saldo💳"), types.KeyboardButton(text="💸Retirar💸")],
             [types.KeyboardButton(text="🌳Mis Árboles🌳")],
             [types.KeyboardButton(text="💧Regar Árbol💧")],
             [types.KeyboardButton(text="🏦Balance🏦")],
-            [types.KeyboardButton(text="⚙️Menu⚙️")]
+            [types.KeyboardButton(text="⚙️Menu⚙️"), types.KeyboardButton(text="💰Comprar💰")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
@@ -318,11 +470,11 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def main_menu(message: types.Message):
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="💰Comprar💰"),types.KeyboardButton(text="💸Retirar💸")],
+        [types.KeyboardButton(text="💳Añadir Saldo💳"), types.KeyboardButton(text="💸Retirar💸")],
             [types.KeyboardButton(text="🌳Mis Árboles🌳")],
             [types.KeyboardButton(text="💧Regar Árbol💧")],
             [types.KeyboardButton(text="🏦Balance🏦")],
-            [types.KeyboardButton(text="⚙️Menu⚙️")]
+            [types.KeyboardButton(text="⚙️Menu⚙️"), types.KeyboardButton(text="💰Comprar💰")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
@@ -497,8 +649,63 @@ async def process_buy_callback(callback_query: types.CallbackQuery):
         await callback_query.message.answer("Error al procesar la compra: " + str(e))
         await callback_query.answer()
 
+# --- Handler para cancelar cualquier acción y volver al menú principal ---
+@dp.message(F.text == "❌ Cancelar", StateFilter(None))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    """
+    Este handler se activa cuando el usuario presiona el botón '❌ Cancelar'.
+    Limpia cualquier estado activo y devuelve al usuario al menú principal.
+    """
+    await state.clear() # Limpia el estado por si acaso
+    await message.answer(
+        "✅ Operación cancelada. Has vuelto al menú principal.",
+        reply_markup=main_menu_keyboard()
+    )
 
-# --- 6. MANEJO DE MENÚS ---
+# --- NUEVO HANDLER CORRECTO ---
+@dp.message(WithdrawState.waiting_for_add_balance_amount)
+async def process_add_balance_amount(message: types.Message, state: FSMContext):
+    """Se activa solo cuando el usuario está en el estado de espera de cantidad."""
+    
+    # Si el usuario presiona cancelar, limpiamos el estado y volvemos al menú
+    if message.text == "❌ Cancelar":
+        await state.clear()
+        await message.answer("✅ Operación cancelada. Has vuelto al menú principal.", reply_markup=main_menu_keyboard())
+        return
+
+    try:
+        amount = float(message.text)
+        if amount <= 0:
+            await message.answer("❌ La cantidad debe ser un número positivo. Inténtalo de nuevo.")
+            return
+
+        user_id = message.from_user.id
+        await message.answer("🔁 Generando tu enlace de pago, espera un momento...")
+
+        # Llamar a nuestra función para crear la factura
+        payment_url = await create_nowpayments_invoice(amount, user_id)
+
+        # Crear el botón inline para que el usuario pueda pagar directamente
+        payment_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="💳 Pagar Ahora", url=payment_url)]
+        ])
+
+        await message.answer(
+            f"✅ ¡Listo! Para añadir ${amount:.2f} a tu balance, haz clic en el botón de abajo.\n\n"
+            f"⏳ Una vez completado el pago, tu saldo se actualizará automáticamente.",
+            reply_markup=payment_keyboard
+        )
+
+        # IMPORTANTE: Limpiamos el estado y volvemos a mostrar el menú principal
+        await state.clear()
+        await message.answer("🏦 Menú Principal:", reply_markup=main_menu_keyboard())
+
+    except ValueError:
+        await message.answer("❌ Formato inválido. Por favor, escribe solo un número (ej: 50 o 25.5).")
+    except Exception as e:
+        print(f"Error al crear el pago para el usuario {message.from_user.id}: {e}")
+        await message.answer("❌ Ocurrió un error al generar el pago. Por favor, intenta más tarde.")
+        await state.clear() # Limpiamos el estado también en caso de errorPor favor, intenta más tarde.")
 
 @dp.message(F.text.startswith('/') == False, StateFilter(None))
 async def handle_menu(message: types.Message, state: FSMContext):
@@ -524,6 +731,22 @@ async def handle_menu(message: types.Message, state: FSMContext):
             reply_markup=keyboard,
             parse_mode="HTML"
         )
+
+    elif text == "💳Añadir Saldo💳":
+        # Creamos un teclado con la opción de cancelar
+        cancel_keyboard = types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text="❌ Cancelar")]],
+            resize_keyboard=True,
+            one_time_keyboard=True
+        )
+        await message.answer(
+            "💳 Por favor, escribe la cantidad de USD que deseas agregar a tu balance (ej: 10, 25, 50):\n\n"
+            "✍️ Simplemente envíame el número como un mensaje.\n\n"
+            "O presiona el botón para cancelar.",
+            reply_markup=cancel_keyboard
+        )
+         # <-- CAMBIO CLAVE: PONEMOS AL USUARIO EN EL NUEVO ESTADO
+        await state.set_state(WithdrawState.waiting_for_add_balance_amount)
 
     elif text == "🌳Mis Árboles🌳":
         async with db_pool.acquire() as conn:
@@ -686,7 +909,6 @@ async def handle_menu(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
 
-# --- 7. MANEJADORES DE ESTADOS (FORMULARIO RETIRO) ---
 # --- HANDLER PARA INGRESO DE TARJETA ---
 @dp.message(WithdrawState.waiting_for_card)
 async def process_card(message: types.Message, state: FSMContext):
@@ -720,7 +942,6 @@ async def process_card(message: types.Message, state: FSMContext):
         )
     )
     await state.set_state(WithdrawState.waiting_for_name)
-
 
 # --- HANDLER PARA INGRESO DE NOMBRE COMPLETO ---
 @dp.message(WithdrawState.waiting_for_name)
@@ -1020,17 +1241,29 @@ async def cmd_add_balance(message: types.Message):
     except Exception as e:
         await message.answer(f"Error: {e}")
 
-# --- 10. MAIN ---
+# --- FUNCIÓN PRINCIPAL CORREGIDA ---
 async def main():
+    print("🚀 ESTA ES LA VERSIÓN CORRECTA DEL CÓDIGO - INICIANDO SERVIDOR WEB")
+    # 1. Inicializa la base de datos
     await init_db()
-
-    print("Bot iniciado...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
+    
+    # 2. Configura el webhook de Telegram para que nos envíe los mensajes aquí
+    await set_webhook()
+    
+    # 3. Inicia el servidor web FastAPI
+    # Render se encargará de mantenerlo funcionando.
+    # Este servidor ahora atenderá tanto los webhooks de Telegram como los de NowPayments.
+    config = uvicorn.Config(
+        app,  # Tu aplicación FastAPI
+        host="0.0.0.0",  # Necesario para que sea accesible desde internet
+        port=int(os.getenv("PORT", 10000)),  # Usa el puerto que Render te da
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Bot detenido.")
+    except (KeyboardInterrupt, SystemExit):
+        print("🛑 Aplicación detenida.")
