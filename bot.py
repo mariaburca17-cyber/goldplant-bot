@@ -176,15 +176,13 @@ async def nowpayments_webhook(request: Request):
 app.mount("/webhook", webhook_app)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
-
 async def init_db():
     """Inicializa la conexión y crea las tablas si no existen."""
     global db_pool
     try:
-        # Crear el pool de conexiones
         db_pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=50)
         async with db_pool.acquire() as conn:
-            # Tabla users (CORREGIDA)
+            # Tabla users
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -195,10 +193,9 @@ async def init_db():
                     last_watered TIMESTAMP,
                     card_number TEXT,
                     full_name TEXT,
-                    is_blocked BOOLEAN DEFAULT FALSE -- <-- AÑADE ESTA LÍNEA
+                    is_blocked BOOLEAN DEFAULT FALSE
                 )
             ''')
-            
             # Tabla trees
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS trees (
@@ -211,7 +208,6 @@ async def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             ''')
-            
             # Tabla withdrawals
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS withdrawals (
@@ -227,45 +223,35 @@ async def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             ''')
-            
-        print("Base de datos PostgreSQL inicializada correctamente.")
+        print("Tablas de base de datos verificadas/creadas.")
     except Exception as e:
-        print(f"Error DB: {e}")
+        print(f"Error al inicializar la base de datos: {e}")
+        raise
 
+# --- 3. FUNCIONES AUXILIARES (ASYNC) ---
 async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
-    """
-    Crea una factura en NowPayments y devuelve la URL de pago.
-    """
-    # Creamos un order_id único para rastrear el pago
     order_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    
     invoice_data = {
         "price_amount": amount,
-        "price_currency": "USD",  # Moneda en la que quieres recibir
+        "price_currency": "USD",
         "order_id": order_id,
-        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments_webhook", # Usa la variable de entorno
+        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/webhook/nowpayments_webhook",
         "order_description": f"Recarga de saldo para el usuario {user_id}",
-        "success_url": "https://t.me/Goldplant_bot", # Opcional: a dónde redirige tras pagar
-        "cancel_url": "https://t.me/Goldplant_bot"   # Opcional: a dónde redirige si cancela
+        "success_url": "https://t.me/Goldplant_bot",
+        "cancel_url": "https://t.me/Goldplant_bot"
     }
-
     headers = {
         "x-api-key": os.getenv("NOWPAYMENTS_API_KEY"),
         "Content-Type": "application/json"
     }
-
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
-                "https://api.nowpayments.io/v1/invoice",
-                json=invoice_data,
-                headers=headers
+                "https://api.nowpayments.io/v1/invoice", json=invoice_data, headers=headers
             )
-            response.raise_for_status()  # Lanza un error si la petición falló (código 4xx o 5xx)
-            
+            response.raise_for_status()
             result = response.json()
             return result["invoice_url"]
-
         except httpx.HTTPStatusError as e:
             print(f"Error HTTP al crear factura: {e.response.status_code} - {e.response.text}")
             raise Exception(f"Error al contactar NowPayments: {e.response.status_code}")
@@ -273,7 +259,6 @@ async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
             print(f"Error inesperado al crear factura: {e}")
             raise Exception(f"No se pudo generar la factura de pago.")
 
-# --- 3. FUNCIONES AUXILIARES (ASYNC) ---
 async def send_long_message(message: types.Message, text: str, parse_mode="HTML"):
     MAX_LENGTH = 4096
     for i in range(0, len(text), MAX_LENGTH):
@@ -282,75 +267,53 @@ async def send_long_message(message: types.Message, text: str, parse_mode="HTML"
 async def get_user_data(user_id):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow(
-            "SELECT balance, total_invested, last_watered, referred_by, card_number, full_name FROM users WHERE user_id = $1",
+            "SELECT balance, total_invested, last_watered, referred_by, card_number, full_name FROM users WHERE user_id = \$1",
             user_id
         )
 
 async def register_user_if_new(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
-        # Usamos INSERT ... ON CONFLICT para evitar race conditions o errores de duplicados
-        # PostgreSQL no tiene "IF NOT EXISTS" en INSERT directo, pero ON CONFLICT DO NOTHING simula esto.
-        # Sin embargo, necesitamos saber si era nuevo. Hacemos una query primero o comprobamos filas afectadas.
-        # Estrategia: Intentar insertar, si error de duplicado, ignorar.
-        
         try:
             await conn.execute(
-                "INSERT INTO users (user_id, username, referred_by) VALUES ($1, $2, $3)",
+                "INSERT INTO users (user_id, username, referred_by) VALUES ($1, $2, \$3)",
                 user_id, username, referrer_id
             )
             return True
         except asyncpg.UniqueViolationError:
-            # El usuario ya existe
             return False
 
 async def update_last_watered(user_id):
     now = datetime.now()
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "UPDATE users SET last_watered = $1 WHERE user_id = $2",
-            now, user_id
+            "UPDATE users SET last_watered = $1 WHERE user_id = $2", now, user_id
         )
 
 async def check_pending_withdrawals(user_id):
     async with db_pool.acquire() as conn:
         result = await conn.fetchval(
-            "SELECT id FROM withdrawals WHERE user_id = $1 AND status = 'pending'", 
-            user_id
+            "SELECT id FROM withdrawals WHERE user_id = \$1 AND status = 'pending'", user_id
         )
         return result is not None
 
 async def claim_tree_earnings(user_id: int) -> float:
-    """
-    Calcula las ganancias de un usuario desde su último riego, las añade a su balance
-    en la base de datos y reinicia el contador de riego.
-    Devuelve la cantidad de dinero ganada.
-    """
     async with db_pool.acquire() as conn:
-        # Obtener fecha de último riego y los árboles
-        user_data = await conn.fetchrow("SELECT last_watered FROM users WHERE user_id = $1", user_id)
-        if not user_data:
+        user_data = await conn.fetchrow("SELECT last_watered FROM users WHERE user_id = \$1", user_id)
+        if not user_data or not user_data["last_watered"]:
             return 0.0
-
-        trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = $1", user_id)
+        
+        trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = \$1", user_id)
         if not trees:
             return 0.0
 
-        last_watered = user_data["last_watered"]
-        if not last_watered:
-            return 0.0
-
-        # Calcular ganancias (máximo 24h)
         now = datetime.now()
-        elapsed_seconds = min((now - last_watered).total_seconds(), 86400)
-        total_earnings = 0.0
-        for tree in trees:
-            total_earnings += float(tree["daily_return"]) * (elapsed_seconds / 86400)
+        elapsed_seconds = min((now - user_data["last_watered"]).total_seconds(), 86400)
+        total_earnings = sum(float(tree["daily_return"]) * (elapsed_seconds / 86400) for tree in trees)
 
-        # Si hay ganancias, actualizar balance y fecha de riego
         if total_earnings > 0:
             async with conn.transaction():
                 await conn.execute(
-                    "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = $3",
+                    "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = \$3",
                     total_earnings, now, user_id
                 )
         return total_earnings
@@ -367,7 +330,6 @@ class WithdrawState(StatesGroup):
     waiting_for_add_balance_amount = State()
 
 # --- 5. LÓGICA DEL BOT ---
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -375,20 +337,40 @@ class BlockedMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data: dict):
         if isinstance(event, Message):
             user_id = event.from_user.id
-            if user_id == ADMIN_ID:  # Admin nunca se bloquea
+            if user_id == ADMIN_ID:
                 return await handler(event, data)
-
             async with db_pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT is_blocked FROM users WHERE user_id = $1",
-                    user_id
-                )
+                row = await conn.fetchrow("SELECT is_blocked FROM users WHERE user_id = \$1", user_id)
                 if row and row["is_blocked"]:
                     await event.answer("❌ Estás bloqueado y no puedes usar el bot.")
-                    return  # bloquea sin llamar al handler
-
+                    return
         return await handler(event, data)
 
+# --- FUNCIÓN PARA ESTABLECER EL WEBHOOK ---
+async def set_webhook():
+    global bot
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    webhook_url = f"{os.getenv('WEBHOOK_URL')}{webhook_path}"
+    print(f"Intentando configurar el webhook en: {webhook_url}")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(
+        url=webhook_url,
+        allowed_updates=["message", "callback_query"]
+    )
+    print(f"✅ Webhook de Telegram configurado correctamente en: {webhook_url}")
+
+# --- NUEVO ENDPOINT PARA EL WEBHOOK DE TELEGRAM ---
+@app.post("/webhook/{bot_token}")
+async def telegram_webhook(request: Request, bot_token: str):
+    global bot, dp
+    if bot_token != BOT_TOKEN:
+        return {"status": "error", "message": "Token inválido"}, 403
+    
+    update_data = await request.json()
+    update = types.Update.model_validate(update_data, context={"bot": bot})
+    await dp.feed_update(bot=bot, update=update)
+    return {"status": "ok"}
+    
 # Registrar middleware
 dp.message.middleware(BlockedMiddleware())
 @dp.message(Command("block"))
