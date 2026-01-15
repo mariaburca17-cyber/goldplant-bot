@@ -117,61 +117,77 @@ class StripUserAgentForNowPayments(BaseHTTPMiddleware):
         response = await call_next(request)
         return response
 
-@app.post("/nowpayments/webhook") 
+@app.post("/nowpayments/webhook")
 async def nowpayments_webhook(request: Request):
-    # ... (el resto de tu función de webhook sigue igual)
+    # 1. Obtener la firma y el cuerpo de la petición
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    body = await request.body()
-
+    body_bytes = await request.body()
     ipn_secret = os.getenv("NOWPAYMENTS_IPN_SECRET")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
+    # 2. Decodificar el cuerpo para debug y para el procesamiento
     try:
-        body_str = body.decode('utf-8')
+        body_str = body_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Cuerpo de la petición no es UTF-8 válido")
+
+    # 3. Parsear el JSON y crear el string ordenado para la firma
+    try:
         payment_data = json.loads(body_str)
+        # Creamos el string ordenado y sin espacios, que es como NOWPayments genera la firma
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
         sorted_body_bytes = sorted_body_str.encode('utf-8')
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido (no es JSON)")
 
-        calculated_signature = hmac.new(
-            ipn_secret.encode('utf-8'),
-            sorted_body_bytes,
-            hashlib.sha256
-        ).hexdigest()
+    # 4. Calcular nuestra firma
+    calculated_signature = hmac.new(
+        ipn_secret.encode('utf-8'),
+        sorted_body_bytes,
+        hashlib.sha256
+    ).hexdigest()
 
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
-
+    # 5. Comparar firmas
     if not hmac.compare_digest(received_signature, calculated_signature):
+        # --- DEBUG: Imprime valores si la firma no coincide ---
         print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
         print(f"DEBUG - Firma recibida: {received_signature}")
         print(f"DEBUG - Firma calculada: {calculated_signature}")
         print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
         print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
         print("--------------------------------------")
+        # --------------------------------------------------
         raise HTTPException(status_code=403, detail="Firma inválida")
 
-    if payment_data.get("payment_status") == "finished":
+    # 6. Si la firma es válida, procesar el pago
+    payment_status = payment_data.get("payment_status")
+
+    if payment_status == "finished":
         order_id = payment_data.get("order_id")
         user_id = order_id.split('_')[0]
         amount_paid = payment_data.get("actually_paid")
 
         print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
 
+        # Función para actualizar el balance (definida fuera del webhook)
         async def update_user_balance_in_db(user_id, amount):
             global db_pool
             async with db_pool.acquire() as conn:
                 await conn.execute(
                     "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                    amount, user_id
+                    amount,
+                    user_id
                 )
                 print(f"Balance actualizado para el usuario {user_id}: +${amount}")
 
+        # Ejecutar la actualización
         await update_user_balance_in_db(int(user_id), float(amount_paid))
 
+        # Notificar al usuario
         try:
             await bot.send_message(
                 int(user_id),
@@ -180,6 +196,7 @@ async def nowpayments_webhook(request: Request):
         except Exception as e:
             print(f"No se pudo notificar al usuario {user_id}: {e}")
 
+    # 7. Responder con 200 OK a NOWPayments
     return Response(status_code=200)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
