@@ -104,7 +104,7 @@ async def startup_event():
 
     print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
 
-@app.post("/nowpayments_webhook")
+@app.post("/nowpayments_webhook", headers={"User-Agent": "*"})
 async def nowpayments_webhook(request: Request):
     # 1. Obtener la firma que envía NOWPayments
     received_signature = request.headers.get("x-nowpayments-sig")
