@@ -22,6 +22,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from fastapi import FastAPI, Request, HTTPException
+from bot import StripUserAgentForNowPayments
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # --- 1. CONFIGURACIÓN ---
 load_dotenv()
@@ -51,6 +53,8 @@ db_pool = None
 
 # --- FASTAPI APP ---
 app = FastAPI()
+
+# app.add_middleware(StripUserAgentForNowPayments)
 
 # --- EVENTOS DE LA APLICACIÓN FASTAPI ---
 @app.on_event("startup")
@@ -106,28 +110,11 @@ async def startup_event():
 
 # ... (imports y código anterior)
 
-# --- Middleware final corregido para el Webhook de NOWPayments ---
-@app.middleware("http")
-async def strip_user_agent_for_nowpayments(request: Request, call_next):
-    # Comprueba si la petición es para nuestro webhook específico
-    if request.url.path == "/nowpayments_webhook":
-        # Crea una copia mutable de las cabeceras
-        mutable_headers = request.headers.mutablecopy()
-        # Elimina la cabecera User-Agent para evitar bloqueos.
-        # Usamos un bucle por si hay mayúsculas/minúsculas (ej. User-Agent vs user-agent)
-        keys_to_delete = [key for key in mutable_headers.keys() if key.lower() == "user-agent"]
-        for key in keys_to_delete:
-            del mutable_headers[key]
-        
-        # Reconstruye el scope de la petición con las nuevas cabeceras
-        new_scope = {**request.scope, "headers": mutable_headers.raw}
-        # Crea un nuevo objeto Request con el scope modificado
-        request = Request(new_scope)
-
-    # Continúa con el siguiente middleware o la ruta final
-    response = await call_next(request)
-    return response
-
+class StripUserAgentForNowPayments(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Deja que la petición original llegue al endpoint
+        response = await call_next(request)
+        return response
 
 @app.post("/nowpayments_webhook")
 async def nowpayments_webhook(request: Request):
