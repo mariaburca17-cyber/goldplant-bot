@@ -104,56 +104,76 @@ async def startup_event():
 
     print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
 
-@app.post("/nowpayments_webhook", headers={"User-Agent": "*"})
+# ... (imports y código anterior)
+
+# --- Middleware para el Webhook de NOWPayments ---
+@app.middleware("http")
+async def strip_user_agent_for_nowpayments(request: Request, call_next):
+    # Comprueba si la petición es para nuestro webhook específico
+    if request.url.path == "/nowpayments_webhook":
+        # Crea una copia mutable de las cabeceras
+        headers = dict(request.headers.mutablecopy())
+        # Elimina la cabecera User-Agent para evitar bloqueos
+        headers.pop("user-agent", None)
+        # Crea un nuevo objeto Request con las cabeceras modificadas
+        request = Request(request.scope, receive=request.receive, headers=headers.raw)
+
+    # Continúa con el siguiente middleware o la ruta final
+    response = await call_next(request)
+    return response
+
+
+@app.post("/nowpayments_webhook")  # <-- QUITA EL ARGUMENTO "headers"
 async def nowpayments_webhook(request: Request):
     # 1. Obtener la firma que envía NOWPayments
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    # 2. Leer el cuerpo de la petición como bytes directamente
+    # 2. Leer el cuerpo de la petición como bytes
     body = await request.body()
 
-    # 3. Calcular tu propia firma para comparar
-    # Tanto la clave como el mensaje DEBEN estar en bytes.
+    # 3. Calcular tu propia firma para comparar usando el método robusto
     ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
-    # --- CORRECCIÓN CLAVE ---
-    # Asegúrate de que el cuerpo esté codificado en UTF-8 antes de calcular el hash.
-    # Aunque `body` ya es bytes, a veces puede haber problemas si no se especifica la codificación.
-    # Forzar UTF-8 es la práctica más segura.
-    calculated_signature = hmac.new(
-        ipn_secret.encode('utf-8'),  # La clave secreta en bytes
-        body,                        # El cuerpo también en bytes (¡sin decode!)
-        hashlib.sha256
-    ).hexdigest()
+    try:
+        # --- MÉTODO ROBUSTO PARA CALCULAR LA FIRMA ---
+        body_str = body.decode('utf-8')
+        payment_data = json.loads(body_str)
+        sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
+        sorted_body_bytes = sorted_body_str.encode('utf-8')
 
-    # 4. Comparar las firmas de forma segura
+        calculated_signature = hmac.new(
+            ipn_secret.encode('utf-8'),
+            sorted_body_bytes,
+            hashlib.sha256
+        ).hexdigest()
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
+
+    # 4. Comparar las firmas
     if not hmac.compare_digest(received_signature, calculated_signature):
-        # Para depurar, puedes imprimir las firmas y el cuerpo
-        # print(f"DEBUG - Firma recibida: {received_signature}")
-        # print(f"DEBUG - Firma calculada: {calculated_signature}")
-        # print(f"DEBUG - Cuerpo recibido (bytes): {body}")
-        # print(f"DEBUG - Cuerpo recibido (string): {body.decode('utf-8')}")
+        # Depuración: imprime las firmas y los cuerpos para comparar
+        print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
+        print(f"DEBUG - Firma recibida: {received_signature}")
+        print(f"DEBUG - Firma calculada: {calculated_signature}")
+        print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
+        print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
+        print("--------------------------------------")
         raise HTTPException(status_code=403, detail="Firma inválida")
 
     # 5. Si la firma es válida, procesar el pago
-    # Ahora es seguro parsear el JSON porque ya pasamos la verificación de seguridad
-    payment_data = await request.json()
-
-    # Verificar que el pago está 'finished'
     if payment_data.get("payment_status") == "finished":
         order_id = payment_data.get("order_id")
-        user_id = order_id.split('_')[0]  # Extraer el user_id del order_id
+        user_id = order_id.split('_')[0]
         amount_paid = payment_data.get("actually_paid")
 
-        # Aquí va tu lógica para actualizar la base de datos
         print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
 
-        # --- ¡AQUÍ ESTABA EL FALTA QUE PROVOCA QUE NO SE ACTUALICE EL BALANCE! ---
-        # Necesitas implementar esta función para que el saldo realmente se añada.
+        # Función para actualizar el balance
         async def update_user_balance_in_db(user_id, amount):
             global db_pool
             async with db_pool.acquire() as conn:
@@ -163,10 +183,8 @@ async def nowpayments_webhook(request: Request):
                 )
                 print(f"Balance actualizado para el usuario {user_id}: +${amount}")
 
-        # Llama a la función para actualizar el balance
         await update_user_balance_in_db(int(user_id), float(amount_paid))
 
-        # Opcional: Notificar al usuario
         try:
             await bot.send_message(
                 int(user_id),
@@ -175,7 +193,6 @@ async def nowpayments_webhook(request: Request):
         except Exception as e:
             print(f"No se pudo notificar al usuario {user_id}: {e}")
 
-    # Devuelve una respuesta 200 OK a NOWPayments para confirmar que recibiste el webhook
     return Response(status_code=200)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
