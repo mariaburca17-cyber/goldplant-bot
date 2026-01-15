@@ -106,24 +106,27 @@ async def startup_event():
 
 # ... (imports y código anterior)
 
-# --- Middleware para el Webhook de NOWPayments ---
+# --- Middleware corregido para el Webhook de NOWPayments ---
 @app.middleware("http")
 async def strip_user_agent_for_nowpayments(request: Request, call_next):
     # Comprueba si la petición es para nuestro webhook específico
     if request.url.path == "/nowpayments_webhook":
         # Crea una copia mutable de las cabeceras
-        headers = dict(request.headers.mutablecopy())
+        mutable_headers = request.headers.mutablecopy()
         # Elimina la cabecera User-Agent para evitar bloqueos
-        headers.pop("user-agent", None)
-        # Crea un nuevo objeto Request con las cabeceras modificadas
-        request = Request(request.scope, receive=request.receive, headers=headers.raw)
+        mutable_headers.pop("user-agent", None)
+        # Reconstruye el scope de la petición con las nuevas cabeceras
+        # El scope es un diccionario, y las cabeceras deben ser una lista de tuplas de bytes
+        new_scope = {**request.scope, "headers": mutable_headers.raw}
+        # Crea un nuevo objeto Request con el scope modificado
+        request = Request(new_scope)
 
     # Continúa con el siguiente middleware o la ruta final
     response = await call_next(request)
     return response
 
 
-@app.post("/nowpayments_webhook")  # <-- QUITA EL ARGUMENTO "headers"
+@app.post("/nowpayments_webhook")
 async def nowpayments_webhook(request: Request):
     # 1. Obtener la firma que envía NOWPayments
     received_signature = request.headers.get("x-nowpayments-sig")
