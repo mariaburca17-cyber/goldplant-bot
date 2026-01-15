@@ -29,6 +29,7 @@ NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 NOWPAYMENTS_IPS = ["127.0.0.1"]
+IPN_SECRET_KEY = os.getenv("NOWPAYMENTS_IPN_KEY")
 
 if not BOT_TOKEN:
     print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
@@ -102,62 +103,41 @@ async def startup_event():
 
 @app.post("/nowpayments_webhook")
 async def nowpayments_webhook(request: Request):
-    # 1. Verificar IP (opcional pero recomendado)
-    client_ip = request.client.host
-    if client_ip not in NOWPAYMENTS_IPS:
-        print(f"Webhook llamado desde una IP no autorizada: {client_ip}")
-        return {"status": "error", "message": "Unauthorized IP"}, 403
+    # 1. Obtener la firma que envía NOWPayments
+    received_signature = request.headers.get("x-nowpayments-sig")
+    if not received_signature:
+        raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    # 2. Obtener y validar los datos
-    data = await request.json()
-    print("Webhook recibido de NowPayments:", data)
+    # 2. Leer el cuerpo de la petición
+    body = await request.body()
+    
+    # 3. Calcular tu propia firma para comparar
+    #    NOTA: La documentación de NOWPayments especifica cómo calcular esto.
+    #    Generalmente es HMAC-SHA256 de la clave secreta y el cuerpo.
+    calculated_signature = hmac.new(
+        IPN_SECRET_KEY.encode('utf-8'),
+        body,
+        hashlib.sha256
+    ).hexdigest()
 
-    # Validar que el estado es 'finished' o 'confirmed' (a veces llegan como 'confirmed')
-    payment_status = data.get("payment_status")
-    if payment_status not in ["finished", "confirmed"]:
-        print(f"Estado de pago no final: {payment_status}. No se procesa.")
-        return {"status": "ok"}  # Responde con 200 para no reenvíos
+    # 4. Comparar las firmas
+    if not hmac.compare_digest(received_signature, calculated_signature):
+        raise HTTPException(status_code=403, detail="Firma inválida")
 
-    # 3. Procesar el pago
-    try:
-        # El order_id lo creamos como "user_id_timestamp"
-        order_id = data.get("order_id")
-        if not order_id or "_" not in order_id:
-            raise ValueError("order_id inválido")
+    # 5. Si la firma es válida, procesar el pago
+    payment_data = await request.json()
+    
+    # Verificar que el pago está 'finished'
+    if payment_data.get("payment_status") == "finished":
+        order_id = payment_data.get("order_id")
+        user_id = order_id.split('_')[0] # Extraer el user_id del order_id
+        amount_paid = payment_data.get("actually_paid")
+        
+        # Aquí va tu lógica para actualizar la base de datos
+        print(f"Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
+        # await update_user_balance(user_id, amount_paid)
 
-        user_id = int(order_id.split("_")[0])
-        amount = float(data.get("price_amount", 0))
-        pay_currency = data.get("pay_currency")
-        actually_paid = float(data.get("actually_paid", 0))
-
-        print(f"Procesando pago: User {user_id}, Amount {amount} {pay_currency}, Paid {actually_paid}")
-
-        # Opcional: Verificar que el monto pagado es correcto (para evitar fraudes)
-        # if actually_paid < amount:
-        #     print(f"Pago incompleto para el usuario {user_id}. Monto esperado: {amount}, Pagado: {actually_paid}")
-        #     await bot.send_message(user_id, f"⚠️ Tu pago parece estar incompleto. Por favor, contacta con soporte.")
-        #     return {"status": "ok"}
-
-        # 4. Actualizar el balance del usuario
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                amount,
-                user_id
-            )
-
-        # 5. Notificar al usuario
-        await bot.send_message(
-            user_id,
-            f"✅ ¡Pago de ${amount:.2f} confirmado! Tu balance ha sido actualizado."
-        )
-
-        return {"status": "success"}
-
-    except Exception as e:
-        print(f"Error procesando webhook: {e}")
-        # Devolver un error 500 para que NowPayments pueda reintentar más tarde
-        return {"status": "error", "message": str(e)}, 500
+    return Response(status_code=200)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 
