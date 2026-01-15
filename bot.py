@@ -110,28 +110,27 @@ async def nowpayments_webhook(request: Request):
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    # 2. Leer el cuerpo de la petición como texto plano
+    # 2. Leer el cuerpo de la petición como bytes directamente
     body = await request.body()
-    body_str = body.decode('utf-8')
 
     # 3. Calcular tu propia firma para comparar
-    #    La clave DEBE estar en bytes y el cuerpo en string.
+    #    Tanto la clave como el mensaje DEBEN estar en bytes.
     ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
         
     calculated_signature = hmac.new(
         ipn_secret.encode('utf-8'),  # La clave secreta en bytes
-        body_str,                    # El cuerpo como string (¡NO bytes!)
+        body,                        # El cuerpo también en bytes (¡sin decode!)
         hashlib.sha256
     ).hexdigest()
 
     # 4. Comparar las firmas
     if not hmac.compare_digest(received_signature, calculated_signature):
-        # Para depurar, puedes imprimir las firmas y ver qué falla
+        # Para depurar, puedes imprimir las firmas y el cuerpo
         print(f"DEBUG - Firma recibida: {received_signature}")
         print(f"DEBUG - Firma calculada: {calculated_signature}")
-        print(f"DEBUG - Cuerpo recibido: {body_str}")
+        print(f"DEBUG - Cuerpo recibido (bytes): {body}")
         raise HTTPException(status_code=403, detail="Firma inválida")
 
     # 5. Si la firma es válida, procesar el pago
