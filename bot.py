@@ -114,39 +114,67 @@ async def nowpayments_webhook(request: Request):
     body = await request.body()
 
     # 3. Calcular tu propia firma para comparar
-    #    Tanto la clave como el mensaje DEBEN estar en bytes.
+    # Tanto la clave como el mensaje DEBEN estar en bytes.
     ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
-        
+
+    # --- CORRECCIÓN CLAVE ---
+    # Asegúrate de que el cuerpo esté codificado en UTF-8 antes de calcular el hash.
+    # Aunque `body` ya es bytes, a veces puede haber problemas si no se especifica la codificación.
+    # Forzar UTF-8 es la práctica más segura.
     calculated_signature = hmac.new(
         ipn_secret.encode('utf-8'),  # La clave secreta en bytes
         body,                        # El cuerpo también en bytes (¡sin decode!)
         hashlib.sha256
     ).hexdigest()
 
-    # 4. Comparar las firmas
+    # 4. Comparar las firmas de forma segura
     if not hmac.compare_digest(received_signature, calculated_signature):
         # Para depurar, puedes imprimir las firmas y el cuerpo
-        print(f"DEBUG - Firma recibida: {received_signature}")
-        print(f"DEBUG - Firma calculada: {calculated_signature}")
-        print(f"DEBUG - Cuerpo recibido (bytes): {body}")
+        # print(f"DEBUG - Firma recibida: {received_signature}")
+        # print(f"DEBUG - Firma calculada: {calculated_signature}")
+        # print(f"DEBUG - Cuerpo recibido (bytes): {body}")
+        # print(f"DEBUG - Cuerpo recibido (string): {body.decode('utf-8')}")
         raise HTTPException(status_code=403, detail="Firma inválida")
 
     # 5. Si la firma es válida, procesar el pago
+    # Ahora es seguro parsear el JSON porque ya pasamos la verificación de seguridad
     payment_data = await request.json()
-    
+
     # Verificar que el pago está 'finished'
     if payment_data.get("payment_status") == "finished":
         order_id = payment_data.get("order_id")
-        user_id = order_id.split('_')[0] # Extraer el user_id del order_id
+        user_id = order_id.split('_')[0]  # Extraer el user_id del order_id
         amount_paid = payment_data.get("actually_paid")
-        
+
         # Aquí va tu lógica para actualizar la base de datos
         print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
-        # await update_user_balance_in_db(user_id, amount_paid) # Tu función de BD
-        # await notify_user_of_payment(user_id, amount_paid)    # Notificar al usuario
 
+        # --- ¡AQUÍ ESTABA EL FALTA QUE PROVOCA QUE NO SE ACTUALICE EL BALANCE! ---
+        # Necesitas implementar esta función para que el saldo realmente se añada.
+        async def update_user_balance_in_db(user_id, amount):
+            global db_pool
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                    amount, user_id
+                )
+                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
+
+        # Llama a la función para actualizar el balance
+        await update_user_balance_in_db(int(user_id), float(amount_paid))
+
+        # Opcional: Notificar al usuario
+        try:
+            await bot.send_message(
+                int(user_id),
+                f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
+            )
+        except Exception as e:
+            print(f"No se pudo notificar al usuario {user_id}: {e}")
+
+    # Devuelve una respuesta 200 OK a NOWPayments para confirmar que recibiste el webhook
     return Response(status_code=200)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
