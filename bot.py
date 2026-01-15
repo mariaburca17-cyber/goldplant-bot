@@ -104,45 +104,26 @@ async def startup_event():
 
     print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
 
-# ... (imports y código anterior)
+# Esta app no hereda los middlewares de la app principal (como CORSMiddleware)
+webhook_app = FastAPI()
 
-# --- Middleware final corregido para el Webhook de NOWPayments ---
-@app.middleware("http")
-async def strip_user_agent_for_nowpayments(request: Request, call_next):
-    # Comprueba si la petición es para nuestro webhook específico
-    if request.url.path == "/nowpayments_webhook":
-        # Crea una copia mutable de las cabeceras
-        mutable_headers = request.headers.mutablecopy()
-        # Elimina la cabecera User-Agent para evitar bloqueos.
-        # Usamos un bucle por si hay mayúsculas/minúsculas (ej. User-Agent vs user-agent)
-        keys_to_delete = [key for key in mutable_headers.keys() if key.lower() == "user-agent"]
-        for key in keys_to_delete:
-            del mutable_headers[key]
-        
-        # Reconstruye el scope de la petición con las nuevas cabeceras
-        new_scope = {**request.scope, "headers": mutable_headers.raw}
-        # Crea un nuevo objeto Request con el scope modificado
-        request = Request(new_scope)
-
-    # Continúa con el siguiente middleware o la ruta final
-    response = await call_next(request)
-    return response
-
-
-@app.post("/nowpayments_webhook")
+@webhook_app.post("/nowpayments_webhook")
 async def nowpayments_webhook(request: Request):
-    # ... (el resto de tu función de webhook sigue igual)
+    # 1. Obtener la firma que envía NOWPayments
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
+    # 2. Leer el cuerpo de la petición como bytes
     body = await request.body()
 
+    # 3. Calcular tu propia firma para comparar usando el método robusto
     ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
     try:
+        # --- MÉTODO ROBUSTO PARA CALCULAR LA FIRMA ---
         body_str = body.decode('utf-8')
         payment_data = json.loads(body_str)
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
@@ -157,7 +138,9 @@ async def nowpayments_webhook(request: Request):
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
 
+    # 4. Comparar las firmas
     if not hmac.compare_digest(received_signature, calculated_signature):
+        # Depuración: imprime las firmas y los cuerpos para comparar
         print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
         print(f"DEBUG - Firma recibida: {received_signature}")
         print(f"DEBUG - Firma calculada: {calculated_signature}")
@@ -166,6 +149,7 @@ async def nowpayments_webhook(request: Request):
         print("--------------------------------------")
         raise HTTPException(status_code=403, detail="Firma inválida")
 
+    # 5. Si la firma es válida, procesar el pago
     if payment_data.get("payment_status") == "finished":
         order_id = payment_data.get("order_id")
         user_id = order_id.split('_')[0]
@@ -173,6 +157,7 @@ async def nowpayments_webhook(request: Request):
 
         print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
 
+        # Función para actualizar el balance
         async def update_user_balance_in_db(user_id, amount):
             global db_pool
             async with db_pool.acquire() as conn:
@@ -193,6 +178,12 @@ async def nowpayments_webhook(request: Request):
             print(f"No se pudo notificar al usuario {user_id}: {e}")
 
     return Response(status_code=200)
+
+
+# --- Montar la sub-aplicación del webhook en la aplicación principal ---
+# Esto hace que cualquier petición a /webhook/... sea manejada por webhook_app
+# La URL final será /webhook/nowpayments_webhook
+app.mount("/webhook", webhook_app)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 
