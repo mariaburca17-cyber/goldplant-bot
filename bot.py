@@ -22,7 +22,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from fastapi import FastAPI, Request, HTTPException
-from bot import StripUserAgentForNowPayments
 from starlette.middleware.base import BaseHTTPMiddleware
 
 # --- 1. CONFIGURACIÓN ---
@@ -51,10 +50,14 @@ logging.basicConfig(level=logging.INFO)
 # Variable global para el pool de conexiones
 db_pool = None
 
+class StripUserAgentForNowPayments(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        return response
+
 # --- FASTAPI APP ---
 app = FastAPI()
-
-# app.add_middleware(StripUserAgentForNowPayments)
+app.add_middleware(StripUserAgentForNowPayments)
 
 # --- EVENTOS DE LA APLICACIÓN FASTAPI ---
 @app.on_event("startup")
