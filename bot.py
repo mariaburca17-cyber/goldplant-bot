@@ -31,9 +31,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_URL = os.getenv("DB_URL")
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
 
 NOWPAYMENTS_IPS = ["127.0.0.1"]
-IPN_SECRET_KEY = os.getenv("NOWPAYMENTS_IPN_KEY")
 
 if not BOT_TOKEN:
     print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
@@ -80,7 +80,6 @@ async def startup_event():
     print("Bot de Telegram inicializado.")
 
     # 3. Registrar todos los handlers y middleware del bot
-    # (Mueve todo el registro de handlers aquí para que se hagan sobre el dp correcto)
     dp.message.middleware(BlockedMiddleware())
     dp.message(Command("start"))(cmd_start)
     dp.message(F.text == "📋 Menú Principal 📋", StateFilter(None))(main_menu)
@@ -128,7 +127,7 @@ async def nowpayments_webhook(request: Request):
 
     body = await request.body()
 
-    ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
+    ipn_secret = os.getenv("NOWPAYMENTS_IPN_SECRET")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
@@ -185,7 +184,6 @@ async def nowpayments_webhook(request: Request):
     return Response(status_code=200)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
-
 async def init_db():
     """Inicializa la conexión y crea las tablas si no existen."""
     global db_pool
@@ -250,12 +248,11 @@ async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
     
     invoice_data = {
         "price_amount": amount,
-        "price_currency": "USD",  # Moneda en la que quieres recibir
+        "price_currency": "USD",
         "order_id": order_id,
-        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments_webhook", # Usa la variable de entorno
-        "order_description": f"Recarga de saldo para el usuario {user_id}",
-        "success_url": "https://t.me/Goldplant_bot", # Opcional: a dónde redirige tras pagar
-        "cancel_url": "https://t.me/Goldplant_bot"   # Opcional: a dónde redirige si cancela
+        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments_webhook",
+        "success_url": "https://t.me/Goldplant_bot",
+        "cancel_url": "https://t.me/Goldplant_bot"
     }
 
     headers = {
@@ -270,7 +267,7 @@ async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
                 json=invoice_data,
                 headers=headers
             )
-            response.raise_for_status()  # Lanza un error si la petición falló (código 4xx o 5xx)
+            response.raise_for_status()
             
             result = response.json()
             return result["invoice_url"]
@@ -297,10 +294,6 @@ async def get_user_data(user_id):
 
 async def register_user_if_new(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
-        # Usamos INSERT ... ON CONFLICT para evitar race conditions o errores de duplicados
-        # PostgreSQL no tiene "IF NOT EXISTS" en INSERT directo, pero ON CONFLICT DO NOTHING simula esto.
-        # Sin embargo, necesitamos saber si era nuevo. Hacemos una query primero o comprobamos filas afectadas.
-        # Estrategia: Intentar insertar, si error de duplicado, ignorar.
         
         try:
             await conn.execute(
@@ -309,7 +302,6 @@ async def register_user_if_new(user_id, username, referrer_id=None):
             )
             return True
         except asyncpg.UniqueViolationError:
-            # El usuario ya existe
             return False
 
 async def update_last_watered(user_id):
@@ -335,7 +327,6 @@ async def claim_tree_earnings(user_id: int) -> float:
     Devuelve la cantidad de dinero ganada.
     """
     async with db_pool.acquire() as conn:
-        # Obtener fecha de último riego y los árboles
         user_data = await conn.fetchrow("SELECT last_watered FROM users WHERE user_id = $1", user_id)
         if not user_data:
             return 0.0
@@ -376,7 +367,6 @@ class WithdrawState(StatesGroup):
     waiting_for_add_balance_amount = State()
 
 # --- 5. LÓGICA DEL BOT ---
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -466,16 +456,13 @@ async def is_user_blocked(user_id: int) -> bool:
 # --- FUNCIÓN PARA ESTABLECER EL WEBHOOK ---
 async def set_webhook():
     """ Le dice a Telegram que nos envíe los mensajes a nuestra URL en Render. """
-    # La URL de Render más una ruta segura con el token del bot
     webhook_path = f"/webhook/{BOT_TOKEN}"
     webhook_url = f"{os.getenv('WEBHOOK_URL')}{webhook_path}"
 
     print(f"Intentando configurar el webhook en: {webhook_url}")
 
-    # Borra cualquier configuración anterior para evitar errores
     await bot.delete_webhook(drop_pending_updates=True)
     
-    # Establece la nueva dirección
     await bot.set_webhook(
         url=webhook_url,
         allowed_updates=["message", "callback_query"]
@@ -489,21 +476,15 @@ async def telegram_webhook(request: Request, bot_token: str):
     """
     Esta es la puerta de entrada de los mensajes de Telegram en tu servidor.
     """
-    # 1. Seguridad: verifica que el token sea el correcto
+
     if bot_token != BOT_TOKEN:
         return {"status": "error", "message": "Token inválido"}, 403
 
-    # 2. Recibe el mensaje de Telegram
     update_data = await request.json()
-
-    # 3. Le pasa el mensaje a aiogram para que lo procese como siempre
-    # --- CORRECCIÓN DEFINITIVA ---
-    # El dispatcher necesita la instancia del bot para procesar la actualización.
-    # La pasamos como primer argumento.
     update = types.Update.model_validate(update_data, context={"bot": bot})
     await dp.feed_update(bot=bot, update=update)
     
-    return {"status": "ok"}
+        return {"status": "ok"}
 
 # --- HANDLER GLOBAL PARA USUARIOS ---
 @dp.message(Command("start"))
