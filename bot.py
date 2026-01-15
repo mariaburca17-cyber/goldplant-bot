@@ -21,8 +21,7 @@ from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
-from fastapi import FastAPI, Request, HTTPException, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi import FastAPI, Request, HTTPException
 
 # --- 1. CONFIGURACIÓN ---
 load_dotenv()
@@ -32,8 +31,6 @@ DB_URL = os.getenv("DB_URL")
 NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
-
-NOWPAYMENTS_IPS = ["127.0.0.1"]
 
 if not BOT_TOKEN:
     print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
@@ -49,11 +46,6 @@ logging.basicConfig(level=logging.INFO)
 
 # Variable global para el pool de conexiones
 db_pool = None
-
-class StripUserAgentForNowPayments(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        return response
 
 # --- FASTAPI APP ---
 app = FastAPI()
@@ -109,85 +101,77 @@ async def startup_event():
 
     print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
 
-# ... (imports y código anterior)
+# --- Middleware final corregido para el Webhook de NOWPayments ---
+@app.middleware("http")
+async def strip_user_agent_for_nowpayments(request: Request, call_next):
+    if request.url.path == "/nowpayments_webhook":
+        mutable_headers = request.headers.mutablecopy()
+        keys_to_delete = [key for key in mutable_headers.keys() if key.lower() == "user-agent"]
+        for key in keys_to_delete:
+            del mutable_headers[key]
+        
+        new_scope = {**request.scope, "headers": mutable_headers.raw}
+        request = Request(new_scope)
 
-class StripUserAgentForNowPayments(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Deja que la petición original llegue al endpoint
-        response = await call_next(request)
-        return response
+    # Continúa con el siguiente middleware o la ruta final
+    response = await call_next(request)
+    return response
+
 
 @app.post("/nowpayments/webhook")
 async def nowpayments_webhook(request: Request):
-    # 1. Obtener la firma y el cuerpo de la petición
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    body_bytes = await request.body()
-    ipn_secret = os.getenv("NOWPAYMENTS_IPN_SECRET")
+    body = await request.body()
+
+    ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
-    # 2. Decodificar el cuerpo para debug y para el procesamiento
     try:
-        body_str = body_bytes.decode('utf-8')
-    except UnicodeDecodeError:
-        raise HTTPException(status_code=400, detail="Cuerpo de la petición no es UTF-8 válido")
-
-    # 3. Parsear el JSON y crear el string ordenado para la firma
-    try:
+        body_str = body.decode('utf-8')
         payment_data = json.loads(body_str)
-        # Creamos el string ordenado y sin espacios, que es como NOWPayments genera la firma
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
         sorted_body_bytes = sorted_body_str.encode('utf-8')
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido (no es JSON)")
 
-    # 4. Calcular nuestra firma
-    calculated_signature = hmac.new(
-        ipn_secret.encode('utf-8'),
-        sorted_body_bytes,
-        hashlib.sha256
-    ).hexdigest()
+        calculated_signature = hmac.new(
+            ipn_secret.encode('utf-8'),
+            sorted_body_bytes,
+            hashlib.sha256
+        ).hexdigest()
 
-    # 5. Comparar firmas
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
+
     if not hmac.compare_digest(received_signature, calculated_signature):
-        # --- DEBUG: Imprime valores si la firma no coincide ---
         print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
         print(f"DEBUG - Firma recibida: {received_signature}")
         print(f"DEBUG - Firma calculada: {calculated_signature}")
         print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
         print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
         print("--------------------------------------")
-        # --------------------------------------------------
         raise HTTPException(status_code=403, detail="Firma inválida")
 
-    # 6. Si la firma es válida, procesar el pago
-    payment_status = payment_data.get("payment_status")
-
-    if payment_status == "finished":
+    if payment_data.get("payment_status") == "finished":
         order_id = payment_data.get("order_id")
         user_id = order_id.split('_')[0]
         amount_paid = payment_data.get("actually_paid")
 
         print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
 
-        # Función para actualizar el balance (definida fuera del webhook)
         async def update_user_balance_in_db(user_id, amount):
             global db_pool
             async with db_pool.acquire() as conn:
                 await conn.execute(
                     "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                    amount,
-                    user_id
+                    amount, user_id
                 )
                 print(f"Balance actualizado para el usuario {user_id}: +${amount}")
 
-        # Ejecutar la actualización
         await update_user_balance_in_db(int(user_id), float(amount_paid))
 
-        # Notificar al usuario
         try:
             await bot.send_message(
                 int(user_id),
@@ -196,7 +180,6 @@ async def nowpayments_webhook(request: Request):
         except Exception as e:
             print(f"No se pudo notificar al usuario {user_id}: {e}")
 
-    # 7. Responder con 200 OK a NOWPayments
     return Response(status_code=200)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
@@ -204,10 +187,9 @@ async def init_db():
     """Inicializa la conexión y crea las tablas si no existen."""
     global db_pool
     try:
-        # Crear el pool de conexiones
         db_pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=50)
         async with db_pool.acquire() as conn:
-            # Tabla users (CORREGIDA)
+            # Tabla users
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -259,14 +241,14 @@ async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
     """
     Crea una factura en NowPayments y devuelve la URL de pago.
     """
-    # Creamos un order_id único para rastrear el pago
     order_id = f"{user_id}_{int(datetime.now().timestamp())}"
     
     invoice_data = {
         "price_amount": amount,
         "price_currency": "USD",
         "order_id": order_id,
-        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments_webhook",
+        "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments/webhook",
+        "order_description": f"Recarga de saldo para el usuario {user_id}",
         "success_url": "https://t.me/Goldplant_bot",
         "cancel_url": "https://t.me/Goldplant_bot"
     }
@@ -310,7 +292,6 @@ async def get_user_data(user_id):
 
 async def register_user_if_new(user_id, username, referrer_id=None):
     async with db_pool.acquire() as conn:
-        
         try:
             await conn.execute(
                 "INSERT INTO users (user_id, username, referred_by) VALUES ($1, $2, $3)",
@@ -390,7 +371,7 @@ class BlockedMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data: dict):
         if isinstance(event, Message):
             user_id = event.from_user.id
-            if user_id == ADMIN_ID:  # Admin nunca se bloquea
+            if user_id == ADMIN_ID:
                 return await handler(event, data)
 
             async with db_pool.acquire() as conn:
@@ -400,7 +381,7 @@ class BlockedMiddleware(BaseMiddleware):
                 )
                 if row and row["is_blocked"]:
                     await event.answer("❌ Estás bloqueado y no puedes usar el bot.")
-                    return  # bloquea sin llamar al handler
+                    return
 
         return await handler(event, data)
 
@@ -492,11 +473,11 @@ async def telegram_webhook(request: Request, bot_token: str):
     """
     Esta es la puerta de entrada de los mensajes de Telegram en tu servidor.
     """
-
     if bot_token != BOT_TOKEN:
         return {"status": "error", "message": "Token inválido"}, 403
 
     update_data = await request.json()
+
     update = types.Update.model_validate(update_data, context={"bot": bot})
     await dp.feed_update(bot=bot, update=update)
     
@@ -510,7 +491,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
     await state.clear()
 
-    # Registro de usuario
     args = message.text.split()
     referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
     await register_user_if_new(user_id, username, referrer_id)
@@ -626,7 +606,6 @@ async def show_history(message: types.Message):
     if withdrawals:
         msg += "\n💸 Retiros:\n"
     
-        # Mapeo de estados a emojis
         status_map = {
             "approved": "✅",
             "rejected": "❌",
@@ -634,10 +613,8 @@ async def show_history(message: types.Message):
     }
     
         for w in withdrawals:
-            # Solo mostrar fecha, sin hora
             date_str = w['request_date'].strftime("%d/%m/%Y")
         
-            # Obtener emoji según estado
             status_emoji = status_map.get(w['status'], w['status'])
         
             msg += f"• ${w['amount']} - {status_emoji} - {date_str}\n"
@@ -672,8 +649,7 @@ async def process_buy_callback(callback_query: types.CallbackQuery):
     # --- TRANSACCIÓN PARA COMPRA ---
     try:
         async with db_pool.acquire() as conn:
-            async with conn.transaction(): # Iniciamos transacción
-                # 1. Verificar saldo y obtener referidor
+            async with conn.transaction():
                 user_row = await conn.fetchrow("SELECT balance, referred_by FROM users WHERE user_id = $1 FOR UPDATE", user_id)
                 
                 if not user_row:
@@ -933,41 +909,51 @@ async def handle_menu(message: types.Message, state: FSMContext):
         await state.set_state(WithdrawState.waiting_for_card)
 
     elif text == "🏦Balance🏦":
-        user_id = message.from_user.id
         user_data = await get_user_data(user_id)
         if not user_data:
             await message.answer("Error al cargar perfil.")
             return
+            
+        base_balance = float(user_data["balance"])
+        last_watered = user_data["last_watered"]
 
-        # --- PASO 1: Reclamar y guardar las ganancias pendientes en la BD ---
-        # Esta función ya calcula y guarda las ganancias en la base de datos.
-        await claim_tree_earnings(user_id)
+        # --- CÁLCULO DE GANANCIAS (igual que tenías) ---
+        async with db_pool.acquire() as conn:
+            trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = $1", user_id)
+            
+        now = datetime.now()
+        generated_earnings = 0.0
+        if last_watered:
+            elapsed = (now - last_watered).total_seconds()
+            if elapsed > 86400: # máximo 24h
+                elapsed = 86400
+            for tree in trees:
+                generated_earnings += float(tree["daily_return"]) * (elapsed / 86400)
 
-        # --- PASO 2: Obtener los datos actualizados de la base de datos ---
-        # Ahora volvemos a consultar el balance, que ya está actualizado.
-        updated_user_data = await get_user_data(user_id)
-        if not updated_user_data:
-            await message.answer("Error al recargar perfil.")
-            return
-        
-        balance = float(updated_user_data["balance"])
+        # Si hay ganancias, GUARDARLAS en la base de datos
+        if generated_earnings > 0:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = $3",
+                    generated_earnings, now, user_id
+                )
+            # Actualizamos el balance local también para mostrarlo
+            base_balance += generated_earnings
 
-        # --- PASO 3: Obtener el resto de datos para el mensaje ---
+        # --- OBTENER EL RESTO DE DATOS (igual que tenías) ---
         async with db_pool.acquire() as conn:
             total_withdrawn = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = $1 AND status = 'approved'",
-                user_id
+                "SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = $1 AND status = 'approved'", user_id
             )
             total_referral_earnings = await conn.fetchval(
-                "SELECT COALESCE(SUM(t.cost * 0.10), 0) FROM trees t JOIN users u ON t.user_id = u.user_id WHERE u.referred_by = $1",
-                user_id
+                "SELECT COALESCE(SUM(t.cost * 0.10), 0) FROM trees t JOIN users u ON t.user_id = u.user_id WHERE u.referred_by = $1", user_id
             )
-
-        # --- PASO 4: Mostrar el mensaje con el balance correcto ---
+            
+        # --- MOSTRAR EL MENSAJE (ahora con el balance real) ---
         username = message.from_user.username or message.from_user.first_name
         await message.answer(
             f"👤 <b>@{username}</b>\n\n"
-            f"💰 <b>Balance:</b> ${balance:.2f}\n" # Ahora 'balance' es el valor real y actualizado
+            f"💰 <b>Balance:</b> ${base_balance:.2f}\n" # Usamos base_balance que ya es el real
             f"💸 <b>Total Retirado:</b> ${float(total_withdrawn):.2f}\n"
             f"💵 <b>Ganancias de Referidos:</b> ${float(total_referral_earnings):.2f}\n\n"
             f"<i>💧 Las ganancias han sido añadidas a tu balance.</i>",
@@ -1309,12 +1295,10 @@ async def cmd_add_balance(message: types.Message):
 # --- FUNCIÓN PRINCIPAL CORREGIDA ---
 async def main():
     print("🚀 INICIANDO SERVIDOR WEB")
-    # La inicialización ahora se maneja en el evento 'startup' de FastAPI.
-    # Esta función solo se encarga de iniciar el servidor.
     config = uvicorn.Config(
-        app, # Tu aplicación FastAPI
-        host="0.0.0.0", # Necesario para que sea accesible desde internet
-        port=int(os.getenv("PORT", 10000)), # Usa el puerto que Render te da
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)),
         log_level="info"
     )
     server = uvicorn.Server(config)
