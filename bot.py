@@ -484,7 +484,7 @@ async def telegram_webhook(request: Request, bot_token: str):
     update = types.Update.model_validate(update_data, context={"bot": bot})
     await dp.feed_update(bot=bot, update=update)
     
-        return {"status": "ok"}
+    return {"status": "ok"}
 
 # --- HANDLER GLOBAL PARA USUARIOS ---
 @dp.message(Command("start"))
