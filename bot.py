@@ -110,20 +110,28 @@ async def nowpayments_webhook(request: Request):
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    # 2. Leer el cuerpo de la petición
+    # 2. Leer el cuerpo de la petición como texto plano
     body = await request.body()
-    
+    body_str = body.decode('utf-8')
+
     # 3. Calcular tu propia firma para comparar
-    #    NOTA: La documentación de NOWPayments especifica cómo calcular esto.
-    #    Generalmente es HMAC-SHA256 de la clave secreta y el cuerpo.
+    #    La clave DEBE estar en bytes y el cuerpo en string.
+    ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
+    if not ipn_secret:
+        raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
+        
     calculated_signature = hmac.new(
-        IPN_SECRET_KEY.encode('utf-8'),
-        body,
+        ipn_secret.encode('utf-8'),  # La clave secreta en bytes
+        body_str,                    # El cuerpo como string (¡NO bytes!)
         hashlib.sha256
     ).hexdigest()
 
     # 4. Comparar las firmas
     if not hmac.compare_digest(received_signature, calculated_signature):
+        # Para depurar, puedes imprimir las firmas y ver qué falla
+        print(f"DEBUG - Firma recibida: {received_signature}")
+        print(f"DEBUG - Firma calculada: {calculated_signature}")
+        print(f"DEBUG - Cuerpo recibido: {body_str}")
         raise HTTPException(status_code=403, detail="Firma inválida")
 
     # 5. Si la firma es válida, procesar el pago
@@ -136,8 +144,9 @@ async def nowpayments_webhook(request: Request):
         amount_paid = payment_data.get("actually_paid")
         
         # Aquí va tu lógica para actualizar la base de datos
-        print(f"Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
-        # await update_user_balance(user_id, amount_paid)
+        print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
+        # await update_user_balance_in_db(user_id, amount_paid) # Tu función de BD
+        # await notify_user_of_payment(user_id, amount_paid)    # Notificar al usuario
 
     return Response(status_code=200)
 
