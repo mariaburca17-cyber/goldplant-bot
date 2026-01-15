@@ -946,52 +946,41 @@ async def handle_menu(message: types.Message, state: FSMContext):
         await state.set_state(WithdrawState.waiting_for_card)
 
     elif text == "🏦Balance🏦":
+        user_id = message.from_user.id
         user_data = await get_user_data(user_id)
         if not user_data:
             await message.answer("Error al cargar perfil.")
             return
-            
-        base_balance = float(user_data["balance"])
-        last_watered = user_data["last_watered"]
 
-        # --- CÁLCULO DE GANANCIAS (igual que tenías) ---
-        async with db_pool.acquire() as conn:
-            trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = $1", user_id)
-            
-        now = datetime.now()
-        generated_earnings = 0.0
-        if last_watered:
-            elapsed = (now - last_watered).total_seconds()
-            if elapsed > 86400: # máximo 24h
-                elapsed = 86400
-            for tree in trees:
-                generated_earnings += float(tree["daily_return"]) * (elapsed / 86400)
+        # --- PASO 1: Reclamar y guardar las ganancias pendientes en la BD ---
+        # Esta función ya calcula y guarda las ganancias en la base de datos.
+        await claim_tree_earnings(user_id)
 
-        # --- ¡LA PARTE CLAVE QUE FALTABA! ---
-        # Si hay ganancias, GUARDARLAS en la base de datos
-        if generated_earnings > 0:
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = $3",
-                    generated_earnings, now, user_id
-                )
-            # Actualizamos el balance local también para mostrarlo
-            base_balance += generated_earnings
+        # --- PASO 2: Obtener los datos actualizados de la base de datos ---
+        # Ahora volvemos a consultar el balance, que ya está actualizado.
+        updated_user_data = await get_user_data(user_id)
+        if not updated_user_data:
+            await message.answer("Error al recargar perfil.")
+            return
+        
+        balance = float(updated_user_data["balance"])
 
-        # --- OBTENER EL RESTO DE DATOS (igual que tenías) ---
+        # --- PASO 3: Obtener el resto de datos para el mensaje ---
         async with db_pool.acquire() as conn:
             total_withdrawn = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = $1 AND status = 'approved'", user_id
+                "SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = $1 AND status = 'approved'",
+                user_id
             )
             total_referral_earnings = await conn.fetchval(
-                "SELECT COALESCE(SUM(t.cost * 0.10), 0) FROM trees t JOIN users u ON t.user_id = u.user_id WHERE u.referred_by = $1", user_id
+                "SELECT COALESCE(SUM(t.cost * 0.10), 0) FROM trees t JOIN users u ON t.user_id = u.user_id WHERE u.referred_by = $1",
+                user_id
             )
-            
-        # --- MOSTRAR EL MENSAJE (ahora con el balance real) ---
+
+        # --- PASO 4: Mostrar el mensaje con el balance correcto ---
         username = message.from_user.username or message.from_user.first_name
         await message.answer(
             f"👤 <b>@{username}</b>\n\n"
-            f"💰 <b>Balance:</b> ${base_balance:.2f}\n" # Usamos base_balance que ya es el real
+            f"💰 <b>Balance:</b> ${balance:.2f}\n" # Ahora 'balance' es el valor real y actualizado
             f"💸 <b>Total Retirado:</b> ${float(total_withdrawn):.2f}\n"
             f"💵 <b>Ganancias de Referidos:</b> ${float(total_referral_earnings):.2f}\n\n"
             f"<i>💧 Las ganancias han sido añadidas a tu balance.</i>",
