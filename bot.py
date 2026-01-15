@@ -22,32 +22,31 @@ from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import Response # Añadido para el webhook de NOWPayments
 
 # --- 1. CONFIGURACIÓN ---
 load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_URL = os.getenv("DB_URL")
-NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-NOWPAYMENTS_IPS = ["127.0.0.1"]
+NOWPAYMENTS_IPS = ["127.0.0.1"] # En producción, usa las IPs reales de NOWPayments
 IPN_SECRET_KEY = os.getenv("NOWPAYMENTS_IPN_KEY")
 
 if not BOT_TOKEN:
     print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
     sys.exit()
-
 if not DB_URL:
     print("ERROR CRÍTICO: No se encontró la DB_URL")
     sys.exit()
 
-ADMIN_ID = 7430692266  # Tu ID de Telegram
-
+ADMIN_ID = 7430692266 # Tu ID de Telegram
 logging.basicConfig(level=logging.INFO)
 
-# Variable global para el pool de conexiones
+# Variables globales para el pool de conexiones y el bot
 db_pool = None
+bot = None
+dp = None
 
 # --- FASTAPI APP ---
 app = FastAPI()
@@ -55,26 +54,26 @@ app = FastAPI()
 # --- EVENTOS DE LA APLICACIÓN FASTAPI ---
 @app.on_event("startup")
 async def startup_event():
-    """
-    Esta función se ejecuta automáticamente cuando el servidor FastAPI está a punto de iniciar.
-    Es el lugar perfecto para inicializar recursos como la base de datos y el bot.
-    """
-    global bot, dp, db_pool # Declara que vas a modificar las globales
-
+    """Esta función se ejecuta cuando el servidor FastAPI inicia."""
+    global bot, dp, db_pool # Declara que modificarás las globales
     print("Iniciando evento de startup de FastAPI...")
 
     # 1. Inicializar la base de datos PRIMERO
     await init_db()
     print("Base de datos PostgreSQL inicializada correctamente.")
 
-    # 2. Inicializar el bot de Telegram
+    # 2. Inicializar el bot de Telegram y el Dispatcher
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
-    print("Bot de Telegram inicializado.")
+    print("Bot de Telegram y Dispatcher inicializados.")
 
-    # 3. Registrar todos los handlers y middleware del bot
-    # (Mueve todo el registro de handlers aquí para que se hagan sobre el dp correcto)
+    # 3. Registrar todos los handlers y middleware del bot AQUÍ
+    print("Registrando handlers de aiogram...")
+    
+    # Middleware
     dp.message.middleware(BlockedMiddleware())
+
+    # Comandos y mensajes de texto
     dp.message(Command("start"))(cmd_start)
     dp.message(F.text == "📋 Menú Principal 📋", StateFilter(None))(main_menu)
     dp.message(F.text == "⚙️Menu⚙️", StateFilter(None))(more_options)
@@ -83,64 +82,61 @@ async def startup_event():
     dp.message(F.text == "📊 Historial")(show_history)
     dp.message(F.text == "↩️ Volver al Menú Principal")(back_to_main_menu)
     dp.message(F.text == "↩️ Volver a Más Opciones")(back_to_more_options)
-    dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))(process_buy_callback)
     dp.message(F.text == "❌ Cancelar", StateFilter(None))(cmd_cancel)
     dp.message(WithdrawState.waiting_for_add_balance_amount)(process_add_balance_amount)
     dp.message(F.text.startswith('/') == False, StateFilter(None))(handle_menu)
     dp.message(WithdrawState.waiting_for_card)(process_card)
     dp.message(WithdrawState.waiting_for_name)(process_name)
     dp.message(F.text == "❌ Cancelar Retiro")(cancel_withdraw)
-    dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))(admin_approve_withdraw)
-    dp.callback_query(lambda c: c.data and c.data.startswith("reject_"))(admin_reject_withdraw)
     dp.message(WithdrawState.waiting_for_rejection_reason)(process_rejection_reason)
+
+    # Comandos de admin
     dp.message(Command("block"))(cmd_block_user)
     dp.message(Command("unblock"))(cmd_unblock_user)
     dp.message(Command("add"))(cmd_add_balance)
+
+    # Callback Queries
+    dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))(process_buy_callback)
+    dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))(admin_approve_withdraw)
+    dp.callback_query(lambda c: c.data and c.data.startswith("reject_"))(admin_reject_withdraw)
+
     print("Handlers de aiogram registrados.")
 
     # 4. Configurar el webhook de Telegram
     await set_webhook()
     print("Webhook de Telegram configurado.")
-
     print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
 
-# Esta app no hereda los middlewares de la app principal (como CORSMiddleware)
+
+# --- WEBHOOK DE NOWPAYMENTS ---
+# Esta sub-aplicación es una buena práctica para separar lógica
 webhook_app = FastAPI()
 
 @webhook_app.post("/nowpayments_webhook")
 async def nowpayments_webhook(request: Request):
-    # 1. Obtener la firma que envía NOWPayments
+    global bot # Asegúrate de usar la instancia global del bot
+
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    # 2. Leer el cuerpo de la petición como bytes
     body = await request.body()
-
-    # 3. Calcular tu propia firma para comparar usando el método robusto
     ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
     if not ipn_secret:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
     try:
-        # --- MÉTODO ROBUSTO PARA CALCULAR LA FIRMA ---
         body_str = body.decode('utf-8')
         payment_data = json.loads(body_str)
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
         sorted_body_bytes = sorted_body_str.encode('utf-8')
-
         calculated_signature = hmac.new(
-            ipn_secret.encode('utf-8'),
-            sorted_body_bytes,
-            hashlib.sha256
+            ipn_secret.encode('utf-8'), sorted_body_bytes, hashlib.sha256
         ).hexdigest()
-
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
 
-    # 4. Comparar las firmas
     if not hmac.compare_digest(received_signature, calculated_signature):
-        # Depuración: imprime las firmas y los cuerpos para comparar
         print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
         print(f"DEBUG - Firma recibida: {received_signature}")
         print(f"DEBUG - Firma calculada: {calculated_signature}")
@@ -149,40 +145,34 @@ async def nowpayments_webhook(request: Request):
         print("--------------------------------------")
         raise HTTPException(status_code=403, detail="Firma inválida")
 
-    # 5. Si la firma es válida, procesar el pago
     if payment_data.get("payment_status") == "finished":
         order_id = payment_data.get("order_id")
         user_id = order_id.split('_')[0]
         amount_paid = payment_data.get("actually_paid")
-
         print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
 
-        # Función para actualizar el balance
         async def update_user_balance_in_db(user_id, amount):
             global db_pool
             async with db_pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                    amount, user_id
+                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id
                 )
-                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
+            print(f"Balance actualizado para el usuario {user_id}: +\${amount}")
 
         await update_user_balance_in_db(int(user_id), float(amount_paid))
 
         try:
             await bot.send_message(
                 int(user_id),
-                f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
+                f"✅ ¡Pago recibido!\n\nSe han añadido \${amount_paid:.2f} a tu balance. Gracias por tu recarga."
             )
         except Exception as e:
             print(f"No se pudo notificar al usuario {user_id}: {e}")
-
+    
+    # Siempre devuelve un 200 a NOWPayments para que no reenvíe
     return Response(status_code=200)
 
-
-# --- Montar la sub-aplicación del webhook en la aplicación principal ---
-# Esto hace que cualquier petición a /webhook/... sea manejada por webhook_app
-# La URL final será /webhook/nowpayments_webhook
+# Montar la sub-aplicación del webhook en la aplicación principal
 app.mount("/webhook", webhook_app)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
