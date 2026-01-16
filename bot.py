@@ -24,89 +24,87 @@ from aiogram.types import Message, TelegramObject
 from fastapi import FastAPI, Request, HTTPException, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-# --- 1. CONFIGURACIÓN ---
+# --- 1. CONFIGURATION ---
 load_dotenv()
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_URL = os.getenv("DB_URL")
-NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY") 
+NOWPAYMENTS_API_KEY = os.getenv("NOWPAYMENTS_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
 
 if not BOT_TOKEN:
-    print("ERROR CRÍTICO: No se encontró el BOT_TOKEN")
+    print("CRITICAL ERROR: BOT_TOKEN not found")
     sys.exit()
 
 if not DB_URL:
-    print("ERROR CRÍTICO: No se encontró la DB_URL")
+    print("CRITICAL ERROR: DB_URL not found")
     sys.exit()
 
-ADMIN_ID = 7430692266  # Tu ID de Telegram
+ADMIN_ID = 7430692266  # Your Telegram ID
 
 logging.basicConfig(level=logging.INFO)
 
-# Variable global para el pool de conexiones
+# Global variable for the connection pool
 db_pool = None
 
 # --- FASTAPI APP ---
 app = FastAPI()
 
-# --- EVENTOS DE LA APLICACIÓN FASTAPI ---
+# --- FASTAPI APPLICATION EVENTS ---
 @app.on_event("startup")
 async def startup_event():
     """
-    Esta función se ejecuta automáticamente cuando el servidor FastAPI está a punto de iniciar.
-    Es el lugar perfecto para inicializar recursos como la base de datos y el bot.
+    This function runs automatically when the FastAPI server is about to start.
+    It's the perfect place to initialize resources like the database and the bot.
     """
-    global bot, dp, db_pool # Declara que vas a modificar las globales
-
-    print("Iniciando evento de startup de FastAPI...")
-
-    # 1. Inicializar la base de datos PRIMERO
+    global bot, dp, db_pool  # Declare that you will modify the globals
+    print("Starting FastAPI startup event...")
+    
+    # 1. Initialize the database FIRST
     await init_db()
-    print("Base de datos PostgreSQL inicializada correctamente.")
-
-    # 2. Inicializar el bot de Telegram
+    print("PostgreSQL database initialized successfully.")
+    
+    # 2. Initialize the Telegram bot
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
-    print("Bot de Telegram inicializado.")
-
-    # 3. Registrar todos los handlers y middleware del bot
+    print("Telegram bot initialized.")
+    
+    # 3. Register all bot handlers and middleware
     dp.message.middleware(BlockedMiddleware())
     dp.message(Command("start"))(cmd_start)
-    dp.message(F.text == "📋 Menú Principal 📋", StateFilter(None))(main_menu)
+    dp.message(F.text == "📋 Main Menu 📋", StateFilter(None))(main_menu)
     dp.message(F.text == "⚙️Menu⚙️", StateFilter(None))(more_options)
-    dp.message(F.text == "🧑‍🤝‍🧑 Referidos")(show_referrals)
-    dp.message(F.text == "ℹ️ información")(about_goldplant)
-    dp.message(F.text == "📊 Historial")(show_history)
-    dp.message(F.text == "↩️ Volver al Menú Principal")(back_to_main_menu)
-    dp.message(F.text == "↩️ Volver a Más Opciones")(back_to_more_options)
+    dp.message(F.text == "🧑‍🤝‍🧑 Referrals")(show_referrals)
+    dp.message(F.text == "ℹ️ Information")(about_goldplant)
+    dp.message(F.text == "📊 History")(show_history)
+    dp.message(F.text == "↩️ Back to Main Menu")(back_to_main_menu)
+    dp.message(F.text == "↩️ Back to More Options")(back_to_more_options)
     dp.callback_query(lambda c: c.data and c.data.startswith("buy_"))(process_buy_callback)
-    dp.message(F.text == "❌ Cancelar", StateFilter(None))(cmd_cancel)
+    dp.message(F.text == "❌ Cancel", StateFilter(None))(cmd_cancel)
     dp.message(WithdrawState.waiting_for_add_balance_amount)(process_add_balance_amount)
     dp.message(F.text.startswith('/') == False, StateFilter(None))(handle_menu)
     dp.message(WithdrawState.waiting_for_card)(process_card)
     dp.message(WithdrawState.waiting_for_name)(process_name)
-    dp.message(F.text == "❌ Cancelar Retiro")(cancel_withdraw)
+    dp.message(F.text == "❌ Cancel Withdrawal")(cancel_withdraw)
     dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))(admin_approve_withdraw)
     dp.callback_query(lambda c: c.data and c.data.startswith("reject_"))(admin_reject_withdraw)
     dp.message(WithdrawState.waiting_for_rejection_reason)(process_rejection_reason)
     dp.message(Command("block"))(cmd_block_user)
     dp.message(Command("unblock"))(cmd_unblock_user)
     dp.message(Command("add"))(cmd_add_balance)
-    print("Handlers de aiogram registrados.")
-
-    # 4. Configurar el webhook de Telegram
+    print("aiogram handlers registered.")
+    
+    # 4. Configure the Telegram webhook
     await set_webhook()
-    print("Webhook de Telegram configurado.")
+    print("Telegram webhook configured.")
+    
+    print("✅ Startup event completed. The server is ready to receive requests.")
 
-    print("✅ Evento de startup completado. El servidor está listo para recibir peticiones.")
-
-# --- Middleware final corregido para el Webhook de NOWPayments ---
+# --- Final corrected middleware for the NOWPayments Webhook ---
 @app.middleware("http")
 async def strip_user_agent_for_nowpayments(request: Request, call_next):
     if request.url.path == "/nowpayments/webhook":
-        # Guardamos el cuerpo raw sin modificar
+        # We save the raw body without modifying
         body = await request.body()
         request.state.raw_body = body
         response = await call_next(request)
@@ -118,50 +116,50 @@ async def strip_user_agent_for_nowpayments(request: Request, call_next):
 async def nowpayments_webhook(request: Request):
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
-        raise HTTPException(status_code=403, detail="Firma no proporcionada")
-
-    # Usar el cuerpo guardado en el estado
+        raise HTTPException(status_code=403, detail="Signature not provided")
+    
+    # Use the body saved in the state
     body = request.state.raw_body
     NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
     if not NOWPAYMENTS_IPN_SECRET:
-        raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
-
+        raise HTTPException(status_code=500, detail="IPN key not configured on the server")
+    
     try:
-        # Convertir el cuerpo a string
+        # Convert the body to string
         body_str = body.decode('utf-8')
         
-        # Calcular la firma correctamente según la documentación
-        # La firma debe calcularse solo sobre el JSON, sin concatenar la clave
+        # Calculate the signature correctly according to the documentation
+        # The signature should be calculated only over the JSON, without concatenating the key
         calculated_signature = hmac.new(
             key=NOWPAYMENTS_IPN_SECRET.encode(),
-            msg=body_str.encode(),  # Solo el cuerpo JSON, sin concatenar la clave
+            msg=body_str.encode(),  # Only the JSON body, without concatenating the key
             digestmod=hashlib.sha512
         ).hexdigest()
-
+        
         if not hmac.compare_digest(received_signature, calculated_signature):
-            print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
-            print(f"DEBUG - Firma recibida: {received_signature}")
-            print(f"DEBUG - Firma calculada: {calculated_signature}")
-            print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
+            print("--- SIGNATURE VERIFICATION ERROR ---")
+            print(f"DEBUG - Received signature: {received_signature}")
+            print(f"DEBUG - Calculated signature: {calculated_signature}")
+            print(f"DEBUG - Received body (raw): {body_str}")
             print("--------------------------------------")
-            raise HTTPException(status_code=403, detail="Firma inválida")
-
-        # Parsear el JSON después de verificar la firma
+            raise HTTPException(status_code=403, detail="Invalid signature")
+        
+        # Parse the JSON after verifying the signature
         payment_data = json.loads(body_str)
         
-        # Procesamos el pago según su estado
+        # We process the payment according to its status
         payment_status = payment_data.get("payment_status")
-        print(f"Estado del pago: {payment_status}")
+        print(f"Payment status: {payment_status}")
         
         if payment_status == "finished":
-            # Aceptamos ambos estados
+            # We accept both states
             order_id = payment_data.get("order_id")
             user_id = order_id.split('_')[0]
             amount_paid = payment_data.get("actually_paid")
             
-            # Verificamos que el pago no sea cero
+            # We verify that the payment is not zero
             if float(amount_paid) > 0:
-                print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
+                print(f"✅ Payment confirmed for user {user_id}. Amount: {amount_paid}")
                 
                 async def update_user_balance_in_db(user_id, amount):
                     global db_pool
@@ -170,36 +168,36 @@ async def nowpayments_webhook(request: Request):
                             "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
                             amount, user_id
                         )
-                        print(f"Balance actualizado para el usuario {user_id}: +${amount}")
+                        print(f"Balance updated for user {user_id}: +${amount}")
                 
                 await update_user_balance_in_db(int(user_id), float(amount_paid))
                 
                 try:
                     await bot.send_message(
                         int(user_id),
-                        f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
+                        f"✅ Payment received!\n\n${amount_paid:.2f} has been added to your balance. Thank you for your recharge."
                     )
                 except Exception as e:
-                    print(f"No se pudo notificar al usuario {user_id}: {e}")
+                    print(f"Could not notify user {user_id}: {e}")
             else:
-                print(f"⚠️ Pago con monto cero para usuario {user_id}. No se actualiza el balance.")
+                print(f"⚠️ Zero amount payment for user {user_id}. Balance not updated.")
             
             return Response(status_code=200)
         else:
-            print(f"ℹ️ Pago en estado {payment_status}. No se procesa hasta que se complete.")
-            return Response(status_code=200)  # Respondemos con 200 para evitar reintentos
+            print(f"ℹ️ Payment in {payment_status} status. It won't be processed until completed.")
+            return Response(status_code=200)  # We respond with 200 to avoid retries
     
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
+        raise HTTPException(status_code=400, detail="Invalid request body")
 
-# --- 2. BASE DE DATOS (POSTGRESQL) ---
+# --- 2. DATABASE (POSTGRESQL) ---
 async def init_db():
-    """Inicializa la conexión y crea las tablas si no existen."""
+    """Initialize the connection and create tables if they don't exist."""
     global db_pool
     try:
         db_pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=50)
         async with db_pool.acquire() as conn:
-            # Tabla users
+            # Users table
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -210,11 +208,11 @@ async def init_db():
                     last_watered TIMESTAMP,
                     card_number TEXT,
                     full_name TEXT,
-                    is_blocked BOOLEAN DEFAULT FALSE -- <-- AÑADE ESTA LÍNEA
+                    is_blocked BOOLEAN DEFAULT FALSE
                 )
             ''')
             
-            # Tabla trees
+            # Trees table
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS trees (
                     id SERIAL PRIMARY KEY,
@@ -227,7 +225,7 @@ async def init_db():
                 )
             ''')
             
-            # Tabla withdrawals
+            # Withdrawals table
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS withdrawals (
                     id SERIAL PRIMARY KEY,
@@ -242,32 +240,31 @@ async def init_db():
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
                 )
             ''')
-            
-        print("Base de datos PostgreSQL inicializada correctamente.")
+        
+        print("PostgreSQL database initialized successfully.")
     except Exception as e:
-        print(f"Error DB: {e}")
+        print(f"DB Error: {e}")
 
 async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
     """
-    Crea una factura en NowPayments y devuelve la URL de pago.
+    Creates an invoice in NowPayments and returns the payment URL.
     """
     order_id = f"{user_id}_{int(datetime.now().timestamp())}"
-    
     invoice_data = {
         "price_amount": amount,
         "price_currency": "USD",
         "order_id": order_id,
         "ipn_callback_url": f"{os.getenv('WEBHOOK_URL')}/nowpayments/webhook",
-        "order_description": f"Recarga de saldo para el usuario {user_id}",
+        "order_description": f"Balance recharge for user {user_id}",
         "success_url": "https://t.me/Goldplant_bot",
         "cancel_url": "https://t.me/Goldplant_bot"
     }
-
+    
     headers = {
         "x-api-key": os.getenv("NOWPAYMENTS_API_KEY"),
         "Content-Type": "application/json"
     }
-
+    
     async with httpx.AsyncClient() as client:
         try:
             response = await client.post(
@@ -276,18 +273,16 @@ async def create_nowpayments_invoice(amount: float, user_id: int) -> str:
                 headers=headers
             )
             response.raise_for_status()
-            
             result = response.json()
             return result["invoice_url"]
-
         except httpx.HTTPStatusError as e:
-            print(f"Error HTTP al crear factura: {e.response.status_code} - {e.response.text}")
-            raise Exception(f"Error al contactar NowPayments: {e.response.status_code}")
+            print(f"HTTP error when creating invoice: {e.response.status_code} - {e.response.text}")
+            raise Exception(f"Error contacting NowPayments: {e.response.status_code}")
         except Exception as e:
-            print(f"Error inesperado al crear factura: {e}")
-            raise Exception(f"No se pudo generar la factura de pago.")
+            print(f"Unexpected error when creating invoice: {e}")
+            raise Exception(f"Could not generate payment invoice.")
 
-# --- 3. FUNCIONES AUXILIARES (ASYNC) ---
+# --- 3. AUXILIARY FUNCTIONS (ASYNC) ---
 async def send_long_message(message: types.Message, text: str, parse_mode="HTML"):
     MAX_LENGTH = 4096
     for i in range(0, len(text), MAX_LENGTH):
@@ -322,58 +317,59 @@ async def update_last_watered(user_id):
 async def check_pending_withdrawals(user_id):
     async with db_pool.acquire() as conn:
         result = await conn.fetchval(
-            "SELECT id FROM withdrawals WHERE user_id = $1 AND status = 'pending'", 
+            "SELECT id FROM withdrawals WHERE user_id = $1 AND status = 'pending'",
             user_id
         )
         return result is not None
 
 async def claim_tree_earnings(user_id: int) -> float:
     """
-    Calcula las ganancias de un usuario desde su último riego, las añade a su balance
-    en la base de datos y reinicia el contador de riego.
-    Devuelve la cantidad de dinero ganada.
+    Calculates a user's earnings since their last watering, adds them to their balance in the database,
+    and resets the watering counter. Returns the amount of money earned.
     """
     async with db_pool.acquire() as conn:
         user_data = await conn.fetchrow("SELECT last_watered FROM users WHERE user_id = $1", user_id)
         if not user_data:
             return 0.0
-
+        
         trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = $1", user_id)
         if not trees:
             return 0.0
-
+        
         last_watered = user_data["last_watered"]
         if not last_watered:
             return 0.0
-
-        # Calcular ganancias (máximo 24h)
+        
+        # Calculate earnings (maximum 24h)
         now = datetime.now()
         elapsed_seconds = min((now - last_watered).total_seconds(), 86400)
+        
         total_earnings = 0.0
         for tree in trees:
             total_earnings += float(tree["daily_return"]) * (elapsed_seconds / 86400)
-
-        # Si hay ganancias, actualizar balance y fecha de riego
+        
+        # If there are earnings, update balance and watering date
         if total_earnings > 0:
             async with conn.transaction():
                 await conn.execute(
                     "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = $3",
                     total_earnings, now, user_id
                 )
+        
         return total_earnings
 
 async def add_balance_admin(user_id, amount):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", amount, user_id)
 
-# --- 4. ESTADOS FSM ---
+# --- 4. FSM STATES ---
 class WithdrawState(StatesGroup):
     waiting_for_card = State()
     waiting_for_name = State()
     waiting_for_rejection_reason = State()
     waiting_for_add_balance_amount = State()
 
-# --- 5. LÓGICA DEL BOT ---
+# --- 5. BOT LOGIC ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -383,62 +379,65 @@ class BlockedMiddleware(BaseMiddleware):
             user_id = event.from_user.id
             if user_id == ADMIN_ID:
                 return await handler(event, data)
-
+            
             async with db_pool.acquire() as conn:
                 row = await conn.fetchrow(
                     "SELECT is_blocked FROM users WHERE user_id = $1",
                     user_id
                 )
                 if row and row["is_blocked"]:
-                    await event.answer("❌ Estás bloqueado y no puedes usar el bot.")
+                    await event.answer("❌ You are blocked and cannot use the bot.")
                     return
-
+        
         return await handler(event, data)
 
-# Registrar middleware
+# Register middleware
 dp.message.middleware(BlockedMiddleware())
+
 @dp.message(Command("block"))
 async def cmd_block_user(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ No eres admin.")
+        await message.answer("❌ You are not an admin.")
         return
-
+    
     args = message.text.split()
     if len(args) != 2 or not args[1].isdigit():
-        await message.answer("Uso correcto: /block ID_USUARIO")
+        await message.answer("Correct usage: /block USER_ID")
         return
-
+    
     target_id = int(args[1])
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_blocked = TRUE WHERE user_id = $1", target_id)
-    await message.answer(f"✅ Usuario {target_id} bloqueado.")
+    
+    await message.answer(f"✅ User {target_id} blocked.")
 
 @dp.message(Command("unblock"))
 async def cmd_unblock_user(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ No eres admin.")
+        await message.answer("❌ You are not an admin.")
         return
-
+    
     args = message.text.split()
     if len(args) != 2 or not args[1].isdigit():
-        await message.answer("Uso correcto: /unblock ID_USUARIO")
+        await message.answer("Correct usage: /unblock USER_ID")
         return
-
+    
     target_id = int(args[1])
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_blocked = FALSE WHERE user_id = $1", target_id)
-    await message.answer(f"✅ Usuario {target_id} desbloqueado.")
+    
+    await message.answer(f"✅ User {target_id} unblocked.")
 
-# Función para teclado del menú principal
+# Function for main menu keyboard
 def main_menu_keyboard():
     from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="💳Añadir Saldo💳"), KeyboardButton(text="💸Retirar💸")],
-            [KeyboardButton(text="🌳Mis Árboles🌳")],
-            [KeyboardButton(text="💧Regar Árbol💧")],
+            [KeyboardButton(text="💳Add Balance💳"), KeyboardButton(text="💸Withdraw💸")],
+            [KeyboardButton(text="🌳My Trees🌳")],
+            [KeyboardButton(text="💧Water Tree💧")],
             [KeyboardButton(text="🏦Balance🏦")],
-            [KeyboardButton(text="⚙️Menu⚙️"),KeyboardButton(text="💰Comprar💰")]
+            [KeyboardButton(text="⚙️Menu⚙️"),KeyboardButton(text="💰Buy💰")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
@@ -446,200 +445,193 @@ def main_menu_keyboard():
     return keyboard
 
 tree_map = {
-    50: ("$50🌳⭐(4%/DIA)", 0.04),
-    100: ("$100🌳⭐⭐(5%/DIA)", 0.05),
-    300: ("$300🌳⭐⭐⭐(6%/DIA)", 0.06),
-    500: ("$500🌳⭐⭐⭐⭐(7%/DIA)", 0.07),
-    1000: ("$1000🌳⭐⭐⭐⭐⭐(7%/DIA)", 0.07)
+    50: ("$50🌳⭐(4%/DAY)", 0.04),
+    100: ("$100🌳⭐⭐(5%/DAY)", 0.05),
+    300: ("$300🌳⭐⭐⭐(6%/DAY)", 0.06),
+    500: ("$500🌳⭐⭐⭐⭐(7%/DAY)", 0.07),
+    1000: ("$1000🌳⭐⭐⭐⭐⭐(7%/DAY)", 0.07)
 }
 
-# --- FUNCIONES ÚTILES ---
+# --- USEFUL FUNCTIONS ---
 async def is_user_blocked(user_id: int) -> bool:
-    """Revisa si un usuario está bloqueado"""
+    """Check if a user is blocked"""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT is_blocked FROM users WHERE user_id = $1", user_id)
         return row and row['is_blocked']
 
-# --- FUNCIÓN PARA ESTABLECER EL WEBHOOK ---
+# --- FUNCTION TO SET THE WEBHOOK ---
 async def set_webhook():
-    """ Le dice a Telegram que nos envíe los mensajes a nuestra URL en Render. """
+    """
+    Tells Telegram to send us messages to our URL on Render.
+    """
     webhook_path = f"/webhook/{BOT_TOKEN}"
     webhook_url = f"{os.getenv('WEBHOOK_URL')}{webhook_path}"
-
-    print(f"Intentando configurar el webhook en: {webhook_url}")
-
-    await bot.delete_webhook(drop_pending_updates=True)
     
+    print(f"Trying to configure webhook at: {webhook_url}")
+    await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(
         url=webhook_url,
         allowed_updates=["message", "callback_query"]
     )
-    
-    print(f"✅ Webhook de Telegram configurado correctamente en: {webhook_url}")
+    print(f"✅ Telegram webhook configured correctly at: {webhook_url}")
 
-# --- NUEVO ENDPOINT PARA EL WEBHOOK DE TELEGRAM ---
+# --- NEW ENDPOINT FOR THE TELEGRAM WEBHOOK ---
 @app.post("/webhook/{bot_token}")
 async def telegram_webhook(request: Request, bot_token: str):
     """
-    Esta es la puerta de entrada de los mensajes de Telegram en tu servidor.
+    This is the entry point for Telegram messages on your server.
     """
     if bot_token != BOT_TOKEN:
-        return {"status": "error", "message": "Token inválido"}, 403
-
+        return {"status": "error", "message": "Invalid token"}, 403
+    
     update_data = await request.json()
-
     update = types.Update.model_validate(update_data, context={"bot": bot})
     await dp.feed_update(bot=bot, update=update)
     
     return {"status": "ok"}
 
-# --- HANDLER GLOBAL PARA USUARIOS ---
+# --- GLOBAL HANDLER FOR USERS ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    username = message.from_user.username or "Desconocido"
-
+    username = message.from_user.username or "Unknown"
     await state.clear()
-
+    
     args = message.text.split()
     referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+    
     await register_user_if_new(user_id, username, referrer_id)
-
-    # Botón de menú principal al iniciar
+    
+    # Main menu button at start
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="💳Añadir Saldo💳"), types.KeyboardButton(text="💸Retirar💸")],
-            [types.KeyboardButton(text="🌳Mis Árboles🌳")],
-            [types.KeyboardButton(text="💧Regar Árbol💧")],
+            [types.KeyboardButton(text="💳Add Balance💳"), types.KeyboardButton(text="💸Withdraw💸")],
+            [types.KeyboardButton(text="🌳My Trees🌳")],
+            [types.KeyboardButton(text="💧Water Tree💧")],
             [types.KeyboardButton(text="🏦Balance🏦")],
-            [types.KeyboardButton(text="⚙️Menu⚙️"), types.KeyboardButton(text="💰Comprar💰")]
+            [types.KeyboardButton(text="⚙️Menu⚙️"), types.KeyboardButton(text="💰Buy💰")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
     )
-
+    
     await message.answer(
         "╔══════════════╗\n"
-        "🌳 ¡Bienvenido a GOLDPLANT! 🌳\n"
+        "🌳 Welcome to GOLDPLANT! 🌳\n"
         "╚══════════════╝\n\n"
         f"{username}\n\n"
-        "🌳Planta tus árboles y míralos crecer 🌞\n"
-        "💧Riégalos cada 24h para ganar más 💰\n"
-        "🧑‍🤝‍🧑Trae referidos y gana mas🚀\n"
-        "💳Deposita y retira cuando quieras💰\n\n"
-        "🔥¡Comienza tu plantación y hazla prosperar! 🌳🚀",
+        "🌳Plant your trees and watch them grow 🌞\n"
+        "💧Water them every 24h to earn more 💰\n"
+        "🧑‍🤝‍🧑Bring referrals and earn more🚀\n"
+        "💳Deposit and withdraw whenever you want💰\n\n"
+        "🔥Start your plantation and make it prosper! 🌳🚀",
         reply_markup=keyboard
     )
 
-# --- 1️⃣ Botón de menú principal ---
-@dp.message(F.text == "📋 Menú Principal 📋", StateFilter(None))
+# --- 1️⃣ Main menu button ---
+@dp.message(F.text == "📋 Main Menu 📋", StateFilter(None))
 async def main_menu(message: types.Message):
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
-        [types.KeyboardButton(text="💳Añadir Saldo💳"), types.KeyboardButton(text="💸Retirar💸")],
-            [types.KeyboardButton(text="🌳Mis Árboles🌳")],
-            [types.KeyboardButton(text="💧Regar Árbol💧")],
+            [types.KeyboardButton(text="💳Add Balance💳"), types.KeyboardButton(text="💸Withdraw💸")],
+            [types.KeyboardButton(text="🌳My Trees🌳")],
+            [types.KeyboardButton(text="💧Water Tree💧")],
             [types.KeyboardButton(text="🏦Balance🏦")],
-            [types.KeyboardButton(text="⚙️Menu⚙️"), types.KeyboardButton(text="💰Comprar💰")]
+            [types.KeyboardButton(text="⚙️Menu⚙️"), types.KeyboardButton(text="💰Buy💰")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
     )
-    await message.answer("🌳Selecciona una opción:", reply_markup=keyboard)
+    await message.answer("🌳Select an option:", reply_markup=keyboard)
 
-# --- 2️⃣ Botón Más Opciones ---
+# --- 2️⃣ More Options button ---
 @dp.message(F.text == "⚙️Menu⚙️", StateFilter(None))
 async def more_options(message: types.Message):
     keyboard = types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="🧑‍🤝‍🧑 Referidos")],
-            [types.KeyboardButton(text="📊 Historial")],
-            [types.KeyboardButton(text="ℹ️ información"),types.KeyboardButton(text="↩️ Volver al Menú Principal")]
+            [types.KeyboardButton(text="🧑‍🤝‍🧑 Referrals")],
+            [types.KeyboardButton(text="📊 History")],
+            [types.KeyboardButton(text="ℹ️ Information"),types.KeyboardButton(text="↩️ Back to Main Menu")]
         ],
         resize_keyboard=True,
         one_time_keyboard=False
     )
-    await message.answer("🌳 Más Opciones:", reply_markup=keyboard)
+    await message.answer("🌳 More Options:", reply_markup=keyboard)
 
-# --- 3️⃣ Manejo de los botones de Más Opciones ---
-@dp.message(F.text == "🧑‍🤝‍🧑 Referidos")
+# --- 3️⃣ Handling More Options buttons ---
+@dp.message(F.text == "🧑‍🤝‍🧑 Referrals")
 async def show_referrals(message: types.Message):
     user_id = message.from_user.id
     bot_username = "Goldplant_bot"
     ref_link = f"https://t.me/{bot_username}?start={user_id}"
-
+    
     await message.answer(
         "╔════════════╗\n"
-        " ⬇️ TU LINK DE REFERIDO ⬇️ \n"
+        " ⬇️ YOUR REFERRAL LINK ⬇️ \n"
         "╚════════════╝\n"
         f"{ref_link}\n\n"
-        "🟢Invita a tus amigos y gana comisiones del 10% cuando compren árboles.",
+        "🟢Invite your friends and earn 10% commission when they buy trees.",
     )
 
-@dp.message(F.text == "ℹ️ información")
+@dp.message(F.text == "ℹ️ Information")
 async def about_goldplant(message: types.Message):
-
     await message.answer(
-        "Bienvenido a GOLDPLANT, tu bot de inversión gamificado donde puedes cultivar árboles virtuales que generan ganancias reales. 🌱💰\n\n"
-        "Cómo funciona:\n\n"
-        "🌳Compra un árbol🌳: Invierte tu saldo para plantar tu primer árbol.\n"
-        "💧Riega tu árbol💧: Cada 24 horas puedes regarlo para que siga creciendo y generando ganancias.\n"
-        "💰Obtén ganancias💰: Tu árbol produce un retorno diario (ROI) basado en su tipo y tamaño.\n"
-        "💳Depósitos💳: Los depósitos se realizan pagando con tarjeta para recargar tu saldo.\n"
-        "💸Retiros💸: El monto mínimo de retiro es de $50. Para solicitarlo debes ingresar los 16 números de tu tarjeta y el nombre y apellido del titular.\n"
-        "👥Sistema de referidos👥: Invita a tus amigos con tu link único y gana un 10% de las compras de sus árboles**. ¡Más amigos, más ganancias! 🧑‍🤝‍🧑\n\n"
-        "💯Transparencia y seguridad💯:\n\n"
-        "- Todos los cálculos y registros se guardan de forma segura.\n"
-        "- No necesitas intermediarios: todo es automático y confiable.\n\n"
-        "💡 Tip: Cuida tus árboles todos los días y reinvierte tus ganancias para acelerar tu crecimiento.\n\n"
-        "¡Disfruta cultivando y ganando con Goldplant! 🌳🚀"
+        "Welcome to GOLDPLANT, your gamified investment bot where you can grow virtual trees that generate real earnings. 🌱💰\n\n"
+        "How it works:\n\n"
+        "🌳Buy a tree🌳: Invest your balance to plant your first tree.\n"
+        "💧Water your tree💧: Every 24 hours you can water it to keep it growing and generating earnings.\n"
+        "💰Get earnings💰: Your tree produces a daily return (ROI) based on its type and size.\n"
+        "💳Deposits💳: Deposits are made by paying with card to recharge your balance.\n"
+        "💸Withdrawals💸: The minimum withdrawal amount is $50. To request it, you must enter the 16 digits of your card and the name and surname of the holder.\n"
+        "👥Referral system👥: Invite your friends with your unique link and earn 10% of their tree purchases**. More friends, more earnings! 🧑‍🤝‍🧑\n\n"
+        "💯Transparency and security💯:\n\n"
+        "- All calculations and records are securely stored.\n"
+        "- You don't need intermediaries: everything is automatic and reliable.\n\n"
+        "💡 Tip: Take care of your trees every day and reinvest your earnings to accelerate your growth.\n\n"
+        "Enjoy growing and earning with Goldplant! 🌳🚀"
     )
 
-@dp.message(F.text == "📊 Historial")
+@dp.message(F.text == "📊 History")
 async def show_history(message: types.Message):
     user_id = message.from_user.id
-
-    # Aquí puedes obtener el historial de retiros
+    
+    # Here you can get the withdrawal history
     async with db_pool.acquire() as conn:
-        trees = await conn.fetch("SELECT cost, purchase_date FROM trees WHERE user_id = $1", user_id)
         withdrawals = await conn.fetch(
             "SELECT amount, status, request_date FROM withdrawals WHERE user_id = $1 ORDER BY request_date DESC LIMIT 10",
             user_id
         )
-
-    msg = (
-    "╔═════════════╗\n"
-    " 📊 <b>HISTORIAL DE RETIROS</b> 📊\n"
-    "╚═════════════╝\n\n"
-)
-
-    if withdrawals:
-        msg += "\n💸 Retiros:\n"
     
+    msg = (
+        "╔═════════════╗\n"
+        " 📊 <b>WITHDRAWAL HISTORY</b> 📊\n"
+        "╚═════════════╝\n\n"
+    )
+    
+    if withdrawals:
+        msg += "\n💸 Withdrawals:\n"
         status_map = {
             "approved": "✅",
             "rejected": "❌",
             "pending": "⏳"
-    }
-    
+        }
+        
         for w in withdrawals:
             date_str = w['request_date'].strftime("%d/%m/%Y")
-        
             status_emoji = status_map.get(w['status'], w['status'])
-        
             msg += f"• ${w['amount']} - {status_emoji} - {date_str}\n"
     else:
-        msg += "\n💸 Retiros: Ninguno\n"
-
+        msg += "\n💸 Withdrawals: None\n"
+    
     await message.answer(msg, parse_mode="HTML")
 
-# --- 4️⃣ Volver al menú principal ---
-@dp.message(F.text == "↩️ Volver al Menú Principal")
+# --- 4️⃣ Back to main menu ---
+@dp.message(F.text == "↩️ Back to Main Menu")
 async def back_to_main_menu(message: types.Message):
     await main_menu(message)
 
-# --- 5️⃣ Volver a Más Opciones ---
-@dp.message(F.text == "↩️ Volver a Más Opciones")
+# --- 5️⃣ Back to More Options ---
+@dp.message(F.text == "↩️ Back to More Options")
 async def back_to_more_options(message: types.Message):
     await more_options(message)
 
@@ -649,180 +641,180 @@ async def process_buy_callback(callback_query: types.CallbackQuery):
     cost = int(callback_query.data.split("_")[1])
     
     if cost not in tree_map:
-        await callback_query.message.answer("❌ Opción inválida.")
+        await callback_query.message.answer("❌ Invalid option.")
         await callback_query.answer()
         return
-
+    
     tree_type, roi = tree_map[cost]
     daily_return = cost * roi
-
-    # --- TRANSACCIÓN PARA COMPRA ---
+    
+    # --- PURCHASE TRANSACTION ---
     try:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 user_row = await conn.fetchrow("SELECT balance, referred_by FROM users WHERE user_id = $1 FOR UPDATE", user_id)
-                
                 if not user_row:
-                    await callback_query.message.answer("❌ Error al obtener datos del usuario.")
+                    await callback_query.message.answer("❌ Error getting user data.")
                     await callback_query.answer()
                     return
                 
                 current_balance = user_row['balance']
                 referrer_id = user_row['referred_by']
-
+                
                 if current_balance < cost:
-                    mensaje_error = "❌ Saldo insuficiente. Necesitas $" + str(cost) + " para comprar este árbol.\n"
-                    await callback_query.message.answer(mensaje_error)
+                    error_message = "❌ Insufficient balance. You need $" + str(cost) + " to buy this tree.\n"
+                    await callback_query.message.answer(error_message)
                     await callback_query.answer()
                     return
-
-                # 2. Restar saldo y agregar inversión
+                
+                # 2. Subtract balance and add investment
                 await conn.execute("UPDATE users SET total_invested = total_invested + $1, balance = balance - $1 WHERE user_id = $2", cost, user_id)
-
-                # 3. Pagar comisión al referidor si existe
+                
+                # 3. Pay commission to referrer if exists
                 if referrer_id:
                     commission = cost * 0.10
                     await conn.execute("UPDATE users SET balance = balance + $1 WHERE user_id = $2", commission, referrer_id)
-                    print(f"Comisión de {commission} pagada al usuario {referrer_id}")
-
-                # 4. Insertar el árbol
+                    print(f"Commission of {commission} paid to user {referrer_id}")
+                
+                # 4. Insert the tree
                 now = datetime.now()
                 await conn.execute("INSERT INTO trees (user_id, cost, daily_return, purchase_date, last_claimed) VALUES ($1, $2, $3, $4, $4)", user_id, cost, daily_return, now)
-
-        await callback_query.message.answer("Has comprado un Arbol " + str(tree_type))
-        await callback_query.answer()
-
-        # --- NOTIFICACIÓN AL ADMIN ---
-        try:
-            admin_message = (
-                f"🌳 <b>Nuevo árbol comprado</b> por un usuario:\n\n"
-                f"👤 <b>Usuario:</b> @{callback_query.from_user.username}\n"
-                f"💰 <b>Precio del árbol:</b> ${cost}\n"
-                f"🌳 <b>Tipo de árbol:</b> {tree_type}\n"
-                f"🔗 <b>Link del usuario:</b> https://t.me/{callback_query.from_user.username}\n"
-                f"⏰ <b>Fecha de compra:</b> {now}\n"
-            )
-            await bot.send_message(ADMIN_ID, admin_message, parse_mode="HTML")
-        except Exception as e:
-            print(f"Error al enviar notificación al admin: {e}")
-
+                
+                await callback_query.message.answer("You have purchased a Tree " + str(tree_type))
+                await callback_query.answer()
+                
+                # --- ADMIN NOTIFICATION ---
+                try:
+                    admin_message = (
+                        f"🌳 <b>New tree purchased</b> by a user:\n\n"
+                        f"👤 <b>User:</b> @{callback_query.from_user.username}\n"
+                        f"💰 <b>Tree price:</b> ${cost}\n"
+                        f"🌳 <b>Tree type:</b> {tree_type}\n"
+                        f"🔗 <b>User link:</b> https://t.me/{callback_query.from_user.username}\n"
+                        f"⏰ <b>Purchase date:</b> {now}\n"
+                    )
+                    await bot.send_message(ADMIN_ID, admin_message, parse_mode="HTML")
+                except Exception as e:
+                    print(f"Error sending notification to admin: {e}")
+    
     except Exception as e:
-        print(f"Error en compra: {e}")
-        await callback_query.message.answer("Error al procesar la compra: " + str(e))
+        print(f"Purchase error: {e}")
+        await callback_query.message.answer("Error processing purchase: " + str(e))
         await callback_query.answer()
 
-# --- Handler para cancelar cualquier acción y volver al menú principal ---
-@dp.message(F.text == "❌ Cancelar", StateFilter(None))
+# --- Handler to cancel any action and return to main menu ---
+@dp.message(F.text == "❌ Cancel", StateFilter(None))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     """
-    Este handler se activa cuando el usuario presiona el botón '❌ Cancelar'.
-    Limpia cualquier estado activo y devuelve al usuario al menú principal.
+    This handler is activated when the user presses the '❌ Cancel' button.
+    Clears any active state and returns the user to the main menu.
     """
-    await state.clear() # Limpia el estado por si acaso
+    await state.clear()  # Clear the state just in case
     await message.answer(
-        "✅ Operación cancelada. Has vuelto al menú principal.",
+        "✅ Operation cancelled. You have returned to the main menu.",
         reply_markup=main_menu_keyboard()
     )
 
-# --- NUEVO HANDLER CORRECTO ---
+# --- NEW CORRECT HANDLER ---
 @dp.message(WithdrawState.waiting_for_add_balance_amount)
 async def process_add_balance_amount(message: types.Message, state: FSMContext):
-    """Se activa solo cuando el usuario está en el estado de espera de cantidad."""
-    
-    # Si el usuario presiona cancelar, limpiamos el estado y volvemos al menú
-    if message.text == "❌ Cancelar":
+    """This is only activated when the user is in the waiting amount state."""
+    # If the user presses cancel, we clear the state and return to the menu
+    if message.text == "❌ Cancel":
         await state.clear()
-        await message.answer("✅ Operación cancelada. Has vuelto al menú principal.", reply_markup=main_menu_keyboard())
+        await message.answer("✅ Operation cancelled. You have returned to the main menu.", reply_markup=main_menu_keyboard())
         return
-
+    
     try:
         amount = float(message.text)
         if amount <= 0:
-            await message.answer("❌ La cantidad debe ser un número positivo. Inténtalo de nuevo.")
+            await message.answer("❌ The amount must be a positive number. Try again.")
             return
-
+        
         user_id = message.from_user.id
-        await message.answer("🔁 Generando tu enlace de pago, espera un momento...")
-
-        # Llamar a nuestra función para crear la factura
+        await message.answer("🔁 Generating your payment link, please wait...")
+        
+        # Call our function to create the invoice
         payment_url = await create_nowpayments_invoice(amount, user_id)
-
-        # Crear el botón inline para que el usuario pueda pagar directamente
+        
+        # Create the inline button so the user can pay directly
         payment_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="💳 Pagar Ahora", url=payment_url)]
+            [types.InlineKeyboardButton(text="💳 Pay Now", url=payment_url)]
         ])
-
+        
         await message.answer(
-            f"✅ ¡Listo! Para añadir ${amount:.2f} a tu balance, haz clic en el botón de abajo.\n\n"
-            f"⏳ Una vez completado el pago, tu saldo se actualizará automáticamente.",
+            f"✅ Ready! To add ${amount:.2f} to your balance, click the button below.\n\n"
+            f"⏳ Once the payment is completed, your balance will be updated automatically.",
             reply_markup=payment_keyboard
         )
-
-        # IMPORTANTE: Limpiamos el estado y volvemos a mostrar el menú principal
+        
+        # IMPORTANT: We clear the state and return to the main menu
         await state.clear()
-        await message.answer("🏦 Menú Principal:", reply_markup=main_menu_keyboard())
-
+        await message.answer("🏦 Main Menu:", reply_markup=main_menu_keyboard())
+    
     except ValueError:
-        await message.answer("❌ Formato inválido. Por favor, escribe solo un número (ej: 50 o 25.5).")
+        await message.answer("❌ Invalid format. Please write just a number (e.g., 50 or 25.5).")
     except Exception as e:
-        print(f"Error al crear el pago para el usuario {message.from_user.id}: {e}")
-        await message.answer("❌ Ocurrió un error al generar el pago. Por favor, intenta más tarde.")
-        await state.clear() # Limpiamos el estado también en caso de errorPor favor, intenta más tarde.")
+        print(f"Error creating payment for user {message.from_user.id}: {e}")
+        await message.answer("❌ An error occurred while generating the payment. Please try again later.")
+        await state.clear()  # We also clear the state in case of error
 
 @dp.message(F.text.startswith('/') == False, StateFilter(None))
 async def handle_menu(message: types.Message, state: FSMContext):
     text = message.text
     user_id = message.from_user.id
     username = message.from_user.username
-    
     if username is None:
-        username = message.from_user.first_name or "Usuario"
-
-    if text == "💰Comprar💰":
+        username = message.from_user.first_name or "User"
+    
+    if text == "💰Buy💰":
         buttons = []
         for cost, (name, roi) in tree_map.items():
             daily_profit = cost * roi
-            label = f"{name}\n💰 Ganancia: ${daily_profit:.2f}/día"
+            label = f"{name}\n💰 Earnings: ${daily_profit:.2f}/day"
             buttons.append([types.InlineKeyboardButton(text=label, callback_data=f"buy_{cost}")])
         
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer(
             "╔═════════════╗\n"
-            "<b>🌳                  TIENDA                  🌳</b>\n"
+            "<b>🌳 SHOP 🌳</b>\n"
             "╚═════════════╝\n\n",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
-
-    elif text == "💳Añadir Saldo💳":
-        # Creamos un teclado con la opción de cancelar
+    
+    elif text == "💳Add Balance💳":
+        # We create a keyboard with the cancel option
         cancel_keyboard = types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="❌ Cancelar")]],
+            keyboard=[[types.KeyboardButton(text="❌ Cancel")]],
             resize_keyboard=True,
             one_time_keyboard=True
         )
+        
         await message.answer(
-            "💳 Por favor, escribe la cantidad de USD que deseas agregar a tu balance (ej: 10, 25, 50):\n\n"
-            "✍️ Simplemente envíame el número como un mensaje.\n\n"
-            "O presiona el botón para cancelar.",
+            "💳 Please write the amount of USD you want to add to your balance (e.g., 10, 25, 50):\n\n"
+            "✍️ Simply send me the number as a message.\n\n"
+            "Or press the button to cancel.",
             reply_markup=cancel_keyboard
         )
-         # <-- CAMBIO CLAVE: PONEMOS AL USUARIO EN EL NUEVO ESTADO
+        
+        # <-- KEY CHANGE: WE PUT THE USER IN THE NEW STATE
         await state.set_state(WithdrawState.waiting_for_add_balance_amount)
-
-    elif text == "🌳Mis Árboles🌳":
+    
+    elif text == "🌳My Trees🌳":
         async with db_pool.acquire() as conn:
             rows = await conn.fetch("SELECT cost, daily_return, purchase_date FROM trees WHERE user_id = $1", user_id)
         
         if not rows:
-            await message.answer("🍂 Aún no tienes árboles. Compra uno para empezar a cosechar.")
+            await message.answer("🍂 You don't have trees yet. Buy one to start harvesting.")
             return
-
+        
         msg = (
             "╔═════════════╗\n"
-            "<b>🌳 TU BOSQUE PERSONAL 🌳</b>\n"
+            "<b>🌳 YOUR PERSONAL FOREST 🌳</b>\n"
             "╚═════════════╝\n\n"
         )
+        
         total_daily = 0
         for row in rows:
             cost = row['cost']
@@ -830,299 +822,321 @@ async def handle_menu(message: types.Message, state: FSMContext):
             purchase_date = row['purchase_date'].strftime("%d/%m/%Y")
             total_daily += daily
             
-            tree_name = "Árbol Desconocido"
-            if cost == 50: tree_name = "🌳⭐"
-            elif cost == 100: tree_name = "🌳⭐⭐"
-            elif cost == 300: tree_name = "🌳⭐⭐⭐"
-            elif cost == 500: tree_name = "🌳⭐⭐⭐⭐"
-            elif cost == 1000: tree_name = "🌳⭐⭐⭐⭐⭐"
+            tree_name = "Unknown Tree"
+            if cost == 50:
+                tree_name = "🌳⭐"
+            elif cost == 100:
+                tree_name = "🌳⭐⭐"
+            elif cost == 300:
+                tree_name = "🌳⭐⭐⭐"
+            elif cost == 500:
+                tree_name = "🌳⭐⭐⭐⭐"
+            elif cost == 1000:
+                tree_name = "🌳⭐⭐⭐⭐⭐"
             
-            msg += f"• {tree_name} (${cost})\n └ Genera: ${daily:.2f}/día\n └ Comprado: {purchase_date}\n\n"
+            msg += f"• {tree_name} (${cost})\n └ Generates: ${daily:.2f}/day\n └ Purchased: {purchase_date}\n\n"
         
-        msg += f"💰 <b>Rentabilidad Total Diaria:</b> ${total_daily:.2f}"
+        msg += f"💰 <b>Total Daily Earnings:</b> ${total_daily:.2f}"
+        
         await send_long_message(message, msg, parse_mode="HTML")
-
-    elif text == "💧Regar Árbol💧":
-        # Obtener datos del usuario
+    
+    elif text == "💧Water Tree💧":
+        # Get user data
         user_data = await get_user_data(user_id)
         if not user_data:
-            await message.answer("❌ Error al cargar perfil.")
+            await message.answer("❌ Error loading profile.")
             return
-
-        # Traer los árboles del usuario
+        
+        # Get the user's trees
         async with db_pool.acquire() as conn:
             trees = await conn.fetch("SELECT id FROM trees WHERE user_id = $1", user_id)
-
+        
         if not trees:
-            await message.answer("❌ No tienes árboles para regar.")
+            await message.answer("❌ You have no trees to water.")
             return
-
+        
         now = datetime.now()
         last_watered = user_data.get("last_watered")
-    
-        # Revisar si han pasado 24h desde el último riego
+        
+        # Check if 24h have passed since the last watering
         if not last_watered or (now - last_watered).total_seconds() >= 86400:
             async with db_pool.acquire() as conn:
                 await conn.execute(
                     "UPDATE users SET last_watered = $1 WHERE user_id = $2",
                     now, user_id
                 )
+            
             await message.answer(
-                f"💧 Todos tus árboles han sido regados.\n"
-                "⏱️ Empezarán a generar ganancias automáticamente durante 24 horas."
+                f"💧 All your trees have been watered.\n"
+                "⏱️ They will start generating earnings automatically for 24 hours."
             )
         else:
-            # Calcular tiempo restante para el próximo riego
+            # Calculate remaining time for next watering
             remaining_seconds = 86400 - (now - last_watered).total_seconds()
             hours = int(remaining_seconds // 3600)
             minutes = int((remaining_seconds % 3600) // 60)
-            await message.answer(
-                "🌳 Tus árboles ya están regados💧.\n"
-                f"⌛ Próximo riego disponible en: {hours}h {minutes}min"
-            )
-
-    elif text == "💸Retirar💸":
-        user_id = message.from_user.id
             
-        # --- PASO 1: Actualizar balance con las ganancias pendientes ---
+            await message.answer(
+                "🌳 Your trees are already watered💧.\n"
+                f"⌛ Next watering available in: {hours}h {minutes}min"
+            )
+    
+    elif text == "💸Withdraw💸":
+        user_id = message.from_user.id
+        
+        # --- STEP 1: Update balance with pending earnings ---
         earned = await claim_tree_earnings(user_id)
         if earned > 0:
-            print(f"Usuario {user_id}: Ganancias de ${earned:.2f} añadidas antes de retirar.")
-
-        # --- PASO 2: Verificaciones y flujo de retiro (sin cambios) ---
+            print(f"User {user_id}: Earnings of ${earned:.2f} added before withdrawal.")
+        
+        # --- STEP 2: Checks and withdrawal flow (without changes) ---
         user_data = await get_user_data(user_id)
         if not user_data:
-            await message.answer("Error al cargar tu perfil.")
+            await message.answer("Error loading your profile.")
             return
-            
+        
         balance = float(user_data["balance"])
         min_withdraw = 50
-
+        
         if balance < min_withdraw:
-            await message.answer(f"❌ Necesitas acumular al menos ${min_withdraw:.2f} para retirar. Tu balance actual es ${balance:.2f}")
+            await message.answer(f"❌ You need to accumulate at least ${min_withdraw:.2f} to withdraw. Your current balance is ${balance:.2f}")
             return
-
+        
         if await check_pending_withdrawals(user_id):
-            await message.answer("⏳ Ya tienes una solicitud de retiro en proceso.")
+            await message.answer("⏳ You already have a withdrawal request in process.")
             return
-
-        # Iniciar flujo de retiro
+        
+        # Start withdrawal flow
         cancel_kb = types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="❌ Cancelar Retiro")]], 
-            resize_keyboard=True, 
+            keyboard=[[types.KeyboardButton(text="❌ Cancel Withdrawal")]],
+            resize_keyboard=True,
             one_time_keyboard=True
         )
+        
         await message.answer(
-            "💳 Ingresa los 16 números de tu tarjeta de débito o crédito:",
+            "💳 Enter the 16 digits of your debit or credit card:",
             reply_markup=cancel_kb
         )
+        
         await state.set_state(WithdrawState.waiting_for_card)
-
+    
     elif text == "🏦Balance🏦":
         user_data = await get_user_data(user_id)
         if not user_data:
-            await message.answer("Error al cargar perfil.")
+            await message.answer("Error loading profile.")
             return
-            
+        
         base_balance = float(user_data["balance"])
         last_watered = user_data["last_watered"]
-
-        # --- CÁLCULO DE GANANCIAS (igual que tenías) ---
+        
+        # --- EARNINGS CALCULATION (same as you had) ---
         async with db_pool.acquire() as conn:
             trees = await conn.fetch("SELECT daily_return FROM trees WHERE user_id = $1", user_id)
-            
+        
         now = datetime.now()
         generated_earnings = 0.0
+        
         if last_watered:
             elapsed = (now - last_watered).total_seconds()
-            if elapsed > 86400: # máximo 24h
+            if elapsed > 86400:  # maximum 24h
                 elapsed = 86400
+            
             for tree in trees:
                 generated_earnings += float(tree["daily_return"]) * (elapsed / 86400)
-
-        # Si hay ganancias, GUARDARLAS en la base de datos
+        
+        # If there are earnings, SAVE THEM in the database
         if generated_earnings > 0:
             async with db_pool.acquire() as conn:
                 await conn.execute(
                     "UPDATE users SET balance = balance + $1, last_watered = $2 WHERE user_id = $3",
                     generated_earnings, now, user_id
                 )
-            # Actualizamos el balance local también para mostrarlo
+            
+            # We also update the local balance to show it
             base_balance += generated_earnings
-
-        # --- OBTENER EL RESTO DE DATOS (igual que tenías) ---
+        
+        # --- GET THE REST OF THE DATA (same as you had) ---
         async with db_pool.acquire() as conn:
             total_withdrawn = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = $1 AND status = 'approved'", user_id
-            )
-            total_referral_earnings = await conn.fetchval(
-                "SELECT COALESCE(SUM(t.cost * 0.10), 0) FROM trees t JOIN users u ON t.user_id = u.user_id WHERE u.referred_by = $1", user_id
+                "SELECT COALESCE(SUM(amount), 0) FROM withdrawals WHERE user_id = $1 AND status = 'approved'",
+                user_id
             )
             
-        # --- MOSTRAR EL MENSAJE (ahora con el balance real) ---
+            total_referral_earnings = await conn.fetchval(
+                "SELECT COALESCE(SUM(t.cost * 0.10), 0) FROM trees t JOIN users u ON t.user_id = u.user_id WHERE u.referred_by = $1",
+                user_id
+            )
+        
+        # --- SHOW THE MESSAGE (now with the real balance) ---
         username = message.from_user.username or message.from_user.first_name
+        
         await message.answer(
             f"👤 <b>@{username}</b>\n\n"
-            f"💰 <b>Balance:</b> ${base_balance:.2f}\n" # Usamos base_balance que ya es el real
-            f"💸 <b>Total Retirado:</b> ${float(total_withdrawn):.2f}\n"
-            f"💵 <b>Ganancias de Referidos:</b> ${float(total_referral_earnings):.2f}\n\n"
-            f"<i>💧 Las ganancias han sido añadidas a tu balance.</i>",
+            f"💰 <b>Balance:</b> ${base_balance:.2f}\n"  # We use base_balance which is already the real one
+            f"💸 <b>Total Withdrawn:</b> ${float(total_withdrawn):.2f}\n"
+            f"💵 <b>Referral Earnings:</b> ${float(total_referral_earnings):.2f}\n\n"
+            f"<i>💧 Earnings have been added to your balance.</i>",
             parse_mode="HTML"
         )
 
-# --- HANDLER PARA INGRESO DE TARJETA ---
+# --- HANDLER FOR CARD ENTRY ---
 @dp.message(WithdrawState.waiting_for_card)
 async def process_card(message: types.Message, state: FSMContext):
     text = message.text.strip()
-
-    # ⚠️ Si el usuario presiona Cancelar Retiro
-    if text == "❌ Cancelar Retiro":
+    
+    # ⚠️ If the user presses Cancel Withdrawal
+    if text == "❌ Cancel Withdrawal":
         await state.clear()
         await message.answer(
-            "❌ Retiro cancelado. Puedes usar los botones normalmente.",
+            "❌ Withdrawal cancelled. You can use the buttons normally.",
             reply_markup=main_menu_keyboard()
         )
         return
-
-    # Validar número de tarjeta
+    
+    # Validate card number
     card_number = text.replace(" ", "")
     if not card_number.isdigit() or len(card_number) != 16:
         await message.answer(
-            "❌ Número inválido. Asegúrate de escribir exactamente 16 números sin letras ni espacios."
+            "❌ Invalid number. Make sure to write exactly 16 numbers without letters or spaces."
         )
         return
-
-    # Guardar número de tarjeta y pasar al siguiente estado
+    
+    # Save card number and move to the next state
     await state.update_data(card_number=card_number)
+    
     await message.answer(
-        "✅ Tarjeta válida. Ahora escribe tu Nombre y Apellido:",
+        "✅ Valid card. Now write your Full Name:",
         reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[[types.KeyboardButton(text="❌ Cancelar Retiro")]],
+            keyboard=[[types.KeyboardButton(text="❌ Cancel Withdrawal")]],
             resize_keyboard=True,
             one_time_keyboard=True
         )
     )
+    
     await state.set_state(WithdrawState.waiting_for_name)
 
-# --- HANDLER PARA INGRESO DE NOMBRE COMPLETO ---
+# --- HANDLER FOR FULL NAME ENTRY ---
 @dp.message(WithdrawState.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     text = message.text.strip()
-
-    # ⚠️ Si el usuario presiona Cancelar Retiro
-    if text == "❌ Cancelar Retiro":
+    
+    # ⚠️ If the user presses Cancel Withdrawal
+    if text == "❌ Cancel Withdrawal":
         await state.clear()
         await message.answer(
-            "❌ Retiro cancelado. Puedes usar los botones normalmente.",
+            "❌ Withdrawal cancelled. You can use the buttons normally.",
             reply_markup=main_menu_keyboard()
         )
         return
-
+    
     full_name = text
     if len(full_name) < 3:
-        await message.answer("❌ Nombre demasiado corto. Inténtalo de nuevo.")
+        await message.answer("❌ Name too short. Try again.")
         return
-
+    
     user_id = message.from_user.id
     username = message.from_user.username
     data = await state.get_data()
     card_number = data.get("card_number")
-
-    # Obtener datos del usuario
+    
+    # Get user data
     user_data = await get_user_data(user_id)
     if not user_data:
-        await message.answer("Error al obtener datos de usuario.")
+        await message.answer("Error getting user data.")
         await state.clear()
         return
-
+    
     balance = user_data['balance']
+    
     if balance <= 0:
-        await message.answer("❌ No tienes saldo disponible para retirar.")
+        await message.answer("❌ You have no balance available to withdraw.")
         await state.clear()
         return
-
+    
     try:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 now = datetime.now()
-
-                # Insertar solicitud de retiro
+                
+                # Insert withdrawal request
                 await conn.execute(
                     "INSERT INTO withdrawals (user_id, amount, card_number, full_name, status, request_date) VALUES ($1, $2, $3, $4, 'pending', $5)",
                     user_id, balance, card_number, full_name, now
                 )
-
-                # Descontar saldo
+                
+                # Subtract balance
                 await conn.execute(
                     "UPDATE users SET balance = balance - $1 WHERE user_id = $2",
                     balance, user_id
                 )
-
-                # Actualizar datos de pago
+                
+                # Update payment data
                 await conn.execute(
                     "UPDATE users SET card_number = $1, full_name = $2 WHERE user_id = $3",
                     card_number, full_name, user_id
                 )
-
-        # Notificar al admin
-        try:
-            admin_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="✅ Aprobar Retiro", callback_data=f"approve_{user_id}")],
-                [types.InlineKeyboardButton(text="❌ Rechazar Retiro", callback_data=f"reject_{user_id}")]
-            ])
-            await bot.send_message(
-                ADMIN_ID,
-                f"🔔 <b>Nueva Solicitud de Retiro</b>\n\n"
-                f"👤 <b>Usuario:</b> @{username} ({full_name})\n"
-                f"👤 Usuario ID: {user_id}\n"
-                f"⏰ <b>Fecha de solicitud:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"👤 Nombre: {full_name}\n"
-                f"💳 Tarjeta: {card_number}\n"
-                f"💰 Monto: ${balance:.2f}",
-                parse_mode="HTML",
-                reply_markup=admin_keyboard
-            )
-        except Exception as e:
-            print(f"No se pudo notificar al admin: {e}")
-
-        await message.answer(
-            f"✅ Solicitud recibida.\n\nSe ha enviado una solicitud de ${balance:.2f} "
-            f"a la tarjeta terminada en ****{card_number[-4:]}.\n\n⏳ El pago se procesará en menos de 24 horas.",
-            reply_markup=main_menu_keyboard()
-        )
-        await state.clear()
-
+                
+                # Notify admin
+                try:
+                    admin_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+                        [types.InlineKeyboardButton(text="✅ Approve Withdrawal", callback_data=f"approve_{user_id}")],
+                        [types.InlineKeyboardButton(text="❌ Reject Withdrawal", callback_data=f"reject_{user_id}")]
+                    ])
+                    
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🔔 <b>New Withdrawal Request</b>\n\n"
+                        f"👤 <b>User:</b> @{username} ({full_name})\n"
+                        f"👤 User ID: {user_id}\n"
+                        f"⏰ <b>Request date:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"👤 Name: {full_name}\n"
+                        f"💳 Card: {card_number}\n"
+                        f"💰 Amount: ${balance:.2f}",
+                        parse_mode="HTML",
+                        reply_markup=admin_keyboard
+                    )
+                except Exception as e:
+                    print(f"Could not notify admin: {e}")
+                
+                await message.answer(
+                    f"✅ Request received.\n\nA request of ${balance:.2f} "
+                    f"has been sent to the card ending in ****{card_number[-4:]}.\n\n⏳ The payment will be processed in less than 24 hours.",
+                    reply_markup=main_menu_keyboard()
+                )
+                
+                await state.clear()
+    
     except Exception as e:
-        print(f"Error al guardar datos: {e}")
-        await message.answer(f"Error al procesar la solicitud: {e}", reply_markup=main_menu_keyboard())
+        print(f"Error saving data: {e}")
+        await message.answer(f"Error processing request: {e}", reply_markup=main_menu_keyboard())
         await state.clear()
 
-@dp.message(F.text == "❌ Cancelar Retiro")
+@dp.message(F.text == "❌ Cancel Withdrawal")
 async def cancel_withdraw(message: types.Message, state: FSMContext):
-    # Limpiar el estado
+    # Clear the state
     await state.clear()
-
-    # Volver a mostrar el menú principal
+    
+    # Return to the main menu
     await message.answer(
-        "❌ Retiro cancelado. Puedes usar los botones normalmente.",
+        "❌ Withdrawal cancelled. You can use the buttons normally.",
         reply_markup=main_menu_keyboard()
     )
 
-# --- 8. CALLBACK DEL ADMIN ---
-
+# --- 8. ADMIN CALLBACK ---
 @dp.callback_query(lambda c: c.data and c.data.startswith("approve_"))
 async def admin_approve_withdraw(callback_query: types.CallbackQuery):
     if callback_query.from_user.id != ADMIN_ID:
-        await callback_query.answer("❌ No tienes permisos.")
+        await callback_query.answer("❌ You don't have permissions.")
         return
-
+    
     try:
         user_id = int(callback_query.data.split("_")[1])
+        
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                # Buscar último retiro pendiente
+                # Find last pending withdrawal
                 row = await conn.fetchrow(
-                    "SELECT id, amount FROM withdrawals WHERE user_id = $1 AND status = 'pending' ORDER BY id DESC LIMIT 1", 
+                    "SELECT id, amount FROM withdrawals WHERE user_id = $1 AND status = 'pending' ORDER BY id DESC LIMIT 1",
                     user_id
                 )
                 
@@ -1131,70 +1145,71 @@ async def admin_approve_withdraw(callback_query: types.CallbackQuery):
                     amount = row['amount']
                     now = datetime.now()
                     
-                    # Marcar como aprobado
+                    # Mark as approved
                     await conn.execute(
-                        "UPDATE withdrawals SET status = 'approved', processed_date = $1 WHERE id = $2", 
+                        "UPDATE withdrawals SET status = 'approved', processed_date = $1 WHERE id = $2",
                         now, withdraw_id
                     )
                     
-                    # Notificar al usuario
-                    await bot.send_message(user_id, f"✅ Tu solicitud de retiro de ${amount} ha sido aprobada.")
-                    await callback_query.message.edit_text(f"✅ Retiro de ID {user_id} por ${amount} aprobado.")
+                    # Notify user
+                    await bot.send_message(user_id, f"✅ Your withdrawal request of ${amount} has been approved.")
+                    await callback_query.message.edit_text(f"✅ Withdrawal of ID {user_id} for ${amount} approved.")
                     await callback_query.answer()
                 else:
-                    await callback_query.message.edit_text("❌ No se encontró retiro pendiente para este usuario.")
+                    await callback_query.message.edit_text("❌ No pending withdrawal found for this user.")
                     await callback_query.answer()
-
+    
     except Exception as e:
-        print(f"Error aprobación: {e}")
-        await callback_query.answer("Error interno al aprobar.")
+        print(f"Approval error: {e}")
+        await callback_query.answer("Internal error approving.")
 
-# --- CALLBACK DEL ADMIN PARA RECHAZAR RETIROS ---
+# --- ADMIN CALLBACK TO REJECT WITHDRAWALS ---
 @dp.callback_query(lambda c: c.data and c.data.startswith("reject_"))
 async def admin_reject_withdraw(callback_query: types.CallbackQuery, state: FSMContext):
     if callback_query.from_user.id != ADMIN_ID:
-        await callback_query.answer("❌ No tienes permisos.")
+        await callback_query.answer("❌ You don't have permissions.")
         return
-
+    
     try:
         user_id = int(callback_query.data.split("_")[1])
         
-        # Guardamos el ID del usuario cuyo retiro se va a rechazar
+        # We save the ID of the user whose withdrawal will be rejected
         await state.update_data(target_user_id=user_id)
         
-        # Cambiamos el estado del admin para capturar su motivo
+        # We change the admin's state to capture their reason
         await state.set_state(WithdrawState.waiting_for_rejection_reason)
         
         await callback_query.message.edit_text(
-            "❌ Has rechazado el retiro. Por favor, responde a este mensaje con el motivo del rechazo."
+            "❌ You have rejected the withdrawal. Please reply to this message with the reason for rejection."
         )
-        await callback_query.answer()
         
+        await callback_query.answer()
+    
     except Exception as e:
-        print(f"Error en el rechazo: {e}")
-        await callback_query.answer("Error interno al rechazar el retiro.")
+        print(f"Rejection error: {e}")
+        await callback_query.answer("Internal error rejecting withdrawal.")
 
-
-# --- MANEJADOR DEL MOTIVO DE RECHAZO ---
+# --- REJECTION REASON HANDLER ---
 @dp.message(WithdrawState.waiting_for_rejection_reason)
 async def process_rejection_reason(message: types.Message, state: FSMContext):
     rejection_reason = message.text.strip()
+    
     if len(rejection_reason) < 5:
-        await message.answer("❌ El motivo es demasiado corto. Inténtalo de nuevo.")
+        await message.answer("❌ The reason is too short. Try again.")
         return
-
+    
     data = await state.get_data()
     target_user_id = data.get("target_user_id")
     
     if not target_user_id:
-        await message.answer("❌ Error: No se pudo identificar el usuario. Estado reiniciado.")
+        await message.answer("❌ Error: Could not identify the user. State restarted.")
         await state.clear()
         return
-
+    
     try:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
-                # Obtener último retiro pendiente del usuario
+                # Get last pending withdrawal from the user
                 row = await conn.fetchrow(
                     "SELECT id, amount FROM withdrawals WHERE user_id = $1 AND status = 'pending' ORDER BY id DESC LIMIT 1",
                     target_user_id
@@ -1205,106 +1220,106 @@ async def process_rejection_reason(message: types.Message, state: FSMContext):
                     amount = row['amount']
                     now = datetime.now()
                     
-                    # Marcar retiro como rechazado y agregar motivo
+                    # Mark withdrawal as rejected and add reason
                     await conn.execute(
                         "UPDATE withdrawals SET status = 'rejected', rejection_reason = $1, processed_date = $2 WHERE id = $3",
                         rejection_reason, now, withdraw_id
                     )
                     
-                    # Devolver dinero al usuario
+                    # Return money to user
                     await conn.execute(
                         "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
                         amount, target_user_id
                     )
                     
-                    # Notificar al usuario
+                    # Notify user
                     await bot.send_message(
                         target_user_id,
-                        f"❌ Tu solicitud de retiro de ${amount:.2f} ha sido rechazada.\n\nMotivo: {rejection_reason}\n\nEl monto ha sido devuelto a tu balance."
+                        f"❌ Your withdrawal request of ${amount:.2f} has been rejected.\n\nReason: {rejection_reason}\n\nThe amount has been returned to your balance."
                     )
                     
-                    await message.answer(f"✅ Retiro del usuario {target_user_id} rechazado. Motivo enviado y dinero devuelto.")
+                    await message.answer(f"✅ Withdrawal from user {target_user_id} rejected. Reason sent and money returned.")
                 else:
-                    await message.answer("❌ No se encontró un retiro pendiente para este usuario.")
-
-    except Exception as e:
-        print(f"Error al procesar el motivo de rechazo: {e}")
-        await message.answer("Error al procesar la solicitud de rechazo.")
+                    await message.answer("❌ No pending withdrawal found for this user.")
     
-    await state.clear()
+    except Exception as e:
+        print(f"Error processing rejection reason: {e}")
+        await message.answer("Error processing rejection request.")
+        await state.clear()
 
-
-# --- 9. COMANDO /add (SOLO ADMIN) ---
-# --- BLOQUEAR USUARIO ---
+# --- 9. /add COMMAND (ADMIN ONLY) ---
+# --- BLOCK USER ---
 @dp.message(Command("block"))
 async def cmd_block_user(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ No eres admin.")
+        await message.answer("❌ You are not an admin.")
         return
-
+    
     try:
         args = message.text.split()
         if len(args) != 2:
-            await message.answer("Uso: /block USER_ID")
+            await message.answer("Usage: /block USER_ID")
             return
-
+        
         target_id = int(args[1])
-
+        
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET is_blocked = TRUE WHERE user_id = $1", target_id)
-
-        await message.answer(f"✅ Usuario {target_id} bloqueado.")
+        
+        await message.answer(f"✅ User {target_id} blocked.")
+    
     except Exception as e:
         await message.answer(f"Error: {e}")
 
-# --- DESBLOQUEAR USUARIO ---
+# --- UNBLOCK USER ---
 @dp.message(Command("unblock"))
 async def cmd_unblock_user(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ No eres admin.")
+        await message.answer("❌ You are not an admin.")
         return
-
+    
     try:
         args = message.text.split()
         if len(args) != 2:
-            await message.answer("Uso: /unblock USER_ID")
+            await message.answer("Usage: /unblock USER_ID")
             return
-
+        
         target_id = int(args[1])
-
+        
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE users SET is_blocked = FALSE WHERE user_id = $1", target_id)
-
-        await message.answer(f"✅ Usuario {target_id} desbloqueado.")
+        
+        await message.answer(f"✅ User {target_id} unblocked.")
+    
     except Exception as e:
         await message.answer(f"Error: {e}")
 
 @dp.message(Command("add"))
 async def cmd_add_balance(message: types.Message):
     if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ No eres admin.")
+        await message.answer("❌ You are not an admin.")
         return
-
+    
     try:
         args = message.text.split()
         if len(args) != 3:
-            await message.answer("Uso: /add ID CANTIDAD")
+            await message.answer("Usage: /add ID AMOUNT")
             return
-
+        
         target_id = int(args[1])
         amount = float(args[2])
         
         await add_balance_admin(target_id, amount)
-        await message.answer(f"✅ Enviados ${amount} al usuario {target_id}")
-
+        await message.answer(f"✅ ${amount} sent to user {target_id}")
+    
     except ValueError:
-        await message.answer("Error: El ID debe ser un número entero y la cantidad un número decimal.")
+        await message.answer("Error: The ID must be an integer and the amount a decimal number.")
     except Exception as e:
         await message.answer(f"Error: {e}")
 
-# --- FUNCIÓN PRINCIPAL CORREGIDA ---
+# --- CORRECTED MAIN FUNCTION ---
 async def main():
-    print("🚀 INICIANDO SERVIDOR WEB")
+    print("🚀 STARTING WEB SERVER")
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
@@ -1318,4 +1333,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("🛑 Aplicación detenida.")
+        print("🛑 Application stopped.")
