@@ -127,17 +127,16 @@ async def nowpayments_webhook(request: Request):
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
     try:
-        # Convertir el cuerpo a string directamente sin procesar
+        # Convertir el cuerpo a string
         body_str = body.decode('utf-8')
         
+        # Calcular la firma correctamente
         # La firma debe calcularse sobre el cuerpo crudo concatenado con la clave IPN
-        # Este es el formato que NOWPayments espera
         string_to_sign = body_str + NOWPAYMENTS_IPN_SECRET
-        
         calculated_signature = hmac.new(
-            key=NOWPAYMENTS_IPN_SECRET.encode(), # Tu clave IPN secreta real
-            msg=body,  # El cuerpo de la solicitud
-            digestmod=hashlib.sha256  # Este es el parámetro que faltaba
+            key=NOWPAYMENTS_IPN_SECRET.encode(),
+            msg=string_to_sign.encode(),  # <-- CAMBIO CLAVE: Usar el string concatenado
+            digestmod=hashlib.sha256
         ).hexdigest()
 
         if not hmac.compare_digest(received_signature, calculated_signature):
@@ -151,20 +150,21 @@ async def nowpayments_webhook(request: Request):
 
         # Parsear el JSON después de verificar la firma
         payment_data = json.loads(body_str)
-
+        
         # Procesamos el pago según su estado
         payment_status = payment_data.get("payment_status")
         print(f"Estado del pago: {payment_status}")
-
-        if payment_status in ["finished", "confirmed"]:  # Aceptamos ambos estados
+        
+        if payment_status in ["finished", "confirmed"]:
+            # Aceptamos ambos estados
             order_id = payment_data.get("order_id")
             user_id = order_id.split('_')[0]
             amount_paid = payment_data.get("actually_paid")
-
+            
             # Verificamos que el pago no sea cero
             if float(amount_paid) > 0:
                 print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
-
+                
                 async def update_user_balance_in_db(user_id, amount):
                     global db_pool
                     async with db_pool.acquire() as conn:
@@ -173,9 +173,9 @@ async def nowpayments_webhook(request: Request):
                             amount, user_id
                         )
                         print(f"Balance actualizado para el usuario {user_id}: +${amount}")
-
+                
                 await update_user_balance_in_db(int(user_id), float(amount_paid))
-
+                
                 try:
                     await bot.send_message(
                         int(user_id),
@@ -185,12 +185,12 @@ async def nowpayments_webhook(request: Request):
                     print(f"No se pudo notificar al usuario {user_id}: {e}")
             else:
                 print(f"⚠️ Pago con monto cero para usuario {user_id}. No se actualiza el balance.")
-
+            
             return Response(status_code=200)
         else:
             print(f"ℹ️ Pago en estado {payment_status}. No se procesa hasta que se complete.")
             return Response(status_code=200)  # Respondemos con 200 para evitar reintentos
-
+    
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
 
