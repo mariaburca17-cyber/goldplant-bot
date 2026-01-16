@@ -130,13 +130,12 @@ async def nowpayments_webhook(request: Request):
         # Convertir el cuerpo a string
         body_str = body.decode('utf-8')
         
-        # Calcular la firma correctamente
-        # La firma debe calcularse sobre el cuerpo crudo concatenado con la clave IPN
+        # Calcular la firma correctamente con SHA-512
         string_to_sign = body_str + NOWPAYMENTS_IPN_SECRET
         calculated_signature = hmac.new(
             key=NOWPAYMENTS_IPN_SECRET.encode(),
-            msg=string_to_sign.encode(),  # <-- CAMBIO CLAVE: Usar el string concatenado
-            digestmod=hashlib.sha256
+            msg=string_to_sign.encode(),
+            digestmod=hashlib.sha512  # <-- CAMBIO A SHA-512
         ).hexdigest()
 
         if not hmac.compare_digest(received_signature, calculated_signature):
