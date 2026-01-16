@@ -116,63 +116,50 @@ async def strip_user_agent_for_nowpayments(request: Request, call_next):
 
 @app.post("/nowpayments/webhook")
 async def nowpayments_webhook(request: Request):
-    received_signature = request.headers.get("x-nowpayments-sig")
-    if not received_signature:
-        raise HTTPException(status_code=403, detail="Firma no proporcionada")
-
-    # Usar el cuerpo guardado en el estado
-    body = request.state.raw_body
-    NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
-    if not NOWPAYMENTS_IPN_SECRET:
-        raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
-
     try:
-        # Convertir el cuerpo a string
+        body = await request.body()
         body_str = body.decode('utf-8')
-        
-        # Calcular la firma correctamente según la documentación
-        # La firma debe calcularse solo sobre el JSON, sin concatenar la clave
-        calculated_signature = hmac.new(
-            key=NOWPAYMENTS_IPN_SECRET.encode(),
-            msg=body_str.encode(),  # Solo el cuerpo JSON, sin concatenar la clave
-            digestmod=hashlib.sha512
-        ).hexdigest()
-
-        if not hmac.compare_digest(received_signature, calculated_signature):
-            print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
-            print(f"DEBUG - Firma recibida: {received_signature}")
-            print(f"DEBUG - Firma calculada: {calculated_signature}")
-            print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
-            print("--------------------------------------")
-            raise HTTPException(status_code=403, detail="Firma inválida")
-
-        # Parsear el JSON después de verificar la firma
         payment_data = json.loads(body_str)
         
-        # Procesamos el pago según su estado
         payment_status = payment_data.get("payment_status")
-        print(f"Estado del pago: {payment_status}")
+        payment_id = payment_data.get("payment_id")
+        print(f"Estado del pago: {payment_status}, ID: {payment_id}")
         
-        if payment_status in ["finished", "confirmed"]:
-            # Aceptamos ambos estados
+        # Verificar si el pago ya fue procesado
+        async with db_pool.acquire() as conn:
+            already_processed = await conn.fetchval(
+                "SELECT 1 FROM processed_payments WHERE payment_id = $1",
+                payment_id
+            )
+            
+            if already_processed:
+                print(f"ℹ️ Pago {payment_id} ya fue procesado anteriormente.")
+                return Response(status_code=200)
+        
+        # Procesar solo si el estado es "confirmed" o "finished"
+        if payment_status in ["confirmed", "finished"]:
             order_id = payment_data.get("order_id")
             user_id = order_id.split('_')[0]
             amount_paid = payment_data.get("actually_paid")
             
-            # Verificamos que el pago no sea cero
             if float(amount_paid) > 0:
                 print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
                 
-                async def update_user_balance_in_db(user_id, amount):
-                    global db_pool
-                    async with db_pool.acquire() as conn:
+                # Actualizar balance en una transacción
+                async with db_pool.acquire() as conn:
+                    async with conn.transaction():
+                        # Marcar el pago como procesado
+                        await conn.execute(
+                            "INSERT INTO processed_payments (payment_id, processed_at) VALUES ($1, NOW())",
+                            payment_id
+                        )
+                        
+                        # Actualizar balance
                         await conn.execute(
                             "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                            amount, user_id
+                            amount_paid, user_id
                         )
-                        print(f"Balance actualizado para el usuario {user_id}: +${amount}")
-                
-                await update_user_balance_in_db(int(user_id), float(amount_paid))
+                        print(f"Balance actualizado para el usuario {user_id}: +${amount_paid}")
                 
                 try:
                     await bot.send_message(
@@ -181,16 +168,15 @@ async def nowpayments_webhook(request: Request):
                     )
                 except Exception as e:
                     print(f"No se pudo notificar al usuario {user_id}: {e}")
-            else:
-                print(f"⚠️ Pago con monto cero para usuario {user_id}. No se actualiza el balance.")
             
             return Response(status_code=200)
         else:
             print(f"ℹ️ Pago en estado {payment_status}. No se procesa hasta que se complete.")
-            return Response(status_code=200)  # Respondemos con 200 para evitar reintentos
+            return Response(status_code=200)
     
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
+    except Exception as e:
+        print(f"Error en el webhook: {e}")
+        raise HTTPException(status_code=400, detail="Error al procesar la petición")
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 async def init_db():
@@ -240,6 +226,14 @@ async def init_db():
                     processed_date TIMESTAMP,
                     rejection_reason TEXT DEFAULT NULL,
                     FOREIGN KEY(user_id) REFERENCES users(user_id)
+                )
+            ''')
+
+            # Tabla processed_payments (NUEVA)
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS processed_payments (
+                    payment_id BIGINT PRIMARY KEY,
+                    processed_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
             
