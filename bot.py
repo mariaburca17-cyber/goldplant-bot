@@ -128,17 +128,13 @@ async def nowpayments_webhook(request: Request):
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
     
     try:
+        # Convertir el cuerpo a string directamente sin procesar
         body_str = body.decode('utf-8')
-        payment_data = json.loads(body_str)
         
-        # Según la documentación de NOWPayments, necesitamos ordenar las claves del JSON
-        # y usar exactamente el formato que ellos especifican
-        sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
-        
-        # La firma debe calcularse sobre el cuerpo JSON ordenado SIN modificar
+        # La firma debe calcularse sobre el cuerpo crudo sin modificar
         calculated_signature = hmac.new(
             NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-            sorted_body_str.encode('utf-8'),
+            body_str.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         
@@ -147,9 +143,11 @@ async def nowpayments_webhook(request: Request):
             print(f"DEBUG - Firma recibida: {received_signature}")
             print(f"DEBUG - Firma calculada: {calculated_signature}")
             print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
-            print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
             print("--------------------------------------")
             raise HTTPException(status_code=403, detail="Firma inválida")
+        
+        # Parsear el JSON después de verificar la firma
+        payment_data = json.loads(body_str)
         
         # Procesamos el pago según su estado
         payment_status = payment_data.get("payment_status")
@@ -192,7 +190,7 @@ async def nowpayments_webhook(request: Request):
             
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
-        
+
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 async def init_db():
     """Inicializa la conexión y crea las tablas si no existen."""
