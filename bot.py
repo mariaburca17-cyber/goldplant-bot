@@ -117,70 +117,66 @@ async def strip_user_agent_for_nowpayments(request: Request, call_next):
     response = await call_next(request)
     return response
 
-
 @app.post("/nowpayments/webhook")
 async def nowpayments_webhook(request: Request):
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
-
-    body = request.state.raw_body
-
+    
+    body = await request.body()
     NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
     if not NOWPAYMENTS_IPN_SECRET:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
-
+    
     try:
         body_str = body.decode('utf-8')
         payment_data = json.loads(body_str)
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
         sorted_body_bytes = sorted_body_str.encode('utf-8')
-
         calculated_signature = hmac.new(
             NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
             sorted_body_bytes,
             hashlib.sha256
         ).hexdigest()
-
+        
+        if not hmac.compare_digest(received_signature, calculated_signature):
+            print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
+            print(f"DEBUG - Firma recibida: {received_signature}")
+            print(f"DEBUG - Firma calculada: {calculated_signature}")
+            print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
+            print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
+            print("--------------------------------------")
+            raise HTTPException(status_code=403, detail="Firma inválida")
+        
+        if payment_data.get("payment_status") == "finished":
+            order_id = payment_data.get("order_id")
+            user_id = order_id.split('_')[0]
+            amount_paid = payment_data.get("actually_paid")
+            print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
+            
+            async def update_user_balance_in_db(user_id, amount):
+                global db_pool
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                        amount, user_id
+                    )
+                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
+            
+            await update_user_balance_in_db(int(user_id), float(amount_paid))
+            
+            try:
+                await bot.send_message(
+                    int(user_id),
+                    f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
+                )
+            except Exception as e:
+                print(f"No se pudo notificar al usuario {user_id}: {e}")
+        
+        return Response(status_code=200)
+        
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
-
-    if not hmac.compare_digest(received_signature, calculated_signature):
-        print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
-        print(f"DEBUG - Firma recibida: {received_signature}")
-        print(f"DEBUG - Firma calculada: {calculated_signature}")
-        print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
-        print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
-        print("--------------------------------------")
-        raise HTTPException(status_code=403, detail="Firma inválida")
-
-    if payment_data.get("payment_status") == "finished":
-        order_id = payment_data.get("order_id")
-        user_id = order_id.split('_')[0]
-        amount_paid = payment_data.get("actually_paid")
-
-        print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
-
-        async def update_user_balance_in_db(user_id, amount):
-            global db_pool
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                    amount, user_id
-                )
-                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
-
-        await update_user_balance_in_db(int(user_id), float(amount_paid))
-
-        try:
-            await bot.send_message(
-                int(user_id),
-                f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
-            )
-        except Exception as e:
-            print(f"No se pudo notificar al usuario {user_id}: {e}")
-
-    return Response(status_code=200)
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 async def init_db():
