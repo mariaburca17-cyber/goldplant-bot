@@ -132,13 +132,14 @@ async def nowpayments_webhook(request: Request):
         payment_data = json.loads(body_str)
         
         # Según la documentación de NOWPayments, necesitamos ordenar las claves del JSON
-        # y usar separadores específicos para calcular la firma
+        # y eliminar todos los espacios y saltos de línea
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
-        sorted_body_bytes = sorted_body_str.encode('utf-8')
+        # Eliminar todos los espacios y saltos de línea
+        compact_body_str = sorted_body_str.replace(" ", "").replace("\n", "")
         
         calculated_signature = hmac.new(
             NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-            sorted_body_bytes,
+            compact_body_str.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         
@@ -148,6 +149,7 @@ async def nowpayments_webhook(request: Request):
             print(f"DEBUG - Firma calculada: {calculated_signature}")
             print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
             print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
+            print(f"DEBUG - Cuerpo compacto para hash: {compact_body_str}")
             print("--------------------------------------")
             raise HTTPException(status_code=403, detail="Firma inválida")
         
