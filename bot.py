@@ -776,9 +776,9 @@ async def handle_menu(message: types.Message, state: FSMContext):
         
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
         await message.answer(
-            "╔═════╗\n"
-            "<b>🌳 SHOP 🌳</b>\n"
-            "╚═════╝\n\n",
+            "╔═════════════╗\n"
+            "<b>🌳     SHOP     🌳</b>\n"
+            "╚═════════════╝\n\n",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
