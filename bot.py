@@ -104,7 +104,7 @@ async def startup_event():
 # --- Middleware final corregido para el Webhook de NOWPayments ---
 @app.middleware("http")
 async def strip_user_agent_for_nowpayments(request: Request, call_next):
-    if request.url.path == "/nowpayments_webhook":
+    if request.url.path == "/nowpayments/webhook":
         mutable_headers = request.headers.mutablecopy()
         keys_to_delete = [key for key in mutable_headers.keys() if key.lower() == "user-agent"]
         for key in keys_to_delete:
@@ -118,7 +118,48 @@ async def strip_user_agent_for_nowpayments(request: Request, call_next):
     return response
 
 
-unt_paid}")
+@app.post("/nowpayments/webhook")
+async def nowpayments_webhook(request: Request):
+    received_signature = request.headers.get("x-nowpayments-sig")
+    if not received_signature:
+        raise HTTPException(status_code=403, detail="Firma no proporcionada")
+
+    body = await request.body()
+
+    NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
+    if not NOWPAYMENTS_IPN_SECRET:
+        raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
+
+    try:
+        body_str = body.decode('utf-8')
+        payment_data = json.loads(body_str)
+        sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
+        sorted_body_bytes = sorted_body_str.encode('utf-8')
+
+        calculated_signature = hmac.new(
+            NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
+            sorted_body_bytes,
+            hashlib.sha256
+        ).hexdigest()
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
+
+    if not hmac.compare_digest(received_signature, calculated_signature):
+        print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
+        print(f"DEBUG - Firma recibida: {received_signature}")
+        print(f"DEBUG - Firma calculada: {calculated_signature}")
+        print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
+        print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
+        print("--------------------------------------")
+        raise HTTPException(status_code=403, detail="Firma inválida")
+
+    if payment_data.get("payment_status") == "finished":
+        order_id = payment_data.get("order_id")
+        user_id = order_id.split('_')[0]
+        amount_paid = payment_data.get("actually_paid")
+
+        print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
 
         async def update_user_balance_in_db(user_id, amount):
             global db_pool
@@ -143,44 +184,7 @@ unt_paid}")
 
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 async def init_db():
-    """Inicializa la conexión y cr@app.post("/nowpayments/webhook")
-async def nowpayments_webhook(request: Request):
-    # 1. Obtener el cuerpo crudo de la petición como texto
-    body_str = await request.body()
-    
-    # 2. Obtener la firma enviada por NOWPayments
-    received_signature = request.headers.get("x-nowpayments-sig")
-    if not received_signature:
-        raise HTTPException(status_code=403, detail="Firma no proporcionada")
-
-    # 3. Obtener la clave secreta (ya con el nombre corregido)
-    NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") # O el nombre que hayas decidido usar
-    if not NOWPAYMENTS_IPN_SECRET:
-        raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
-
-    # 4. Calcular la firma usando el cuerpo crudo
-    calculated_signature = hmac.new(
-        NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-        body_str,  # <-- ¡EL CAMBIO CLAVE! Usar el cuerpo crudo directamente
-        hashlib.sha256
-    ).hexdigest()
-
-    # 5. Comparar las firmas
-    if not hmac.compare_digest(received_signature, calculated_signature):
-        # Tu debug sigue siendo útil para ver qué pasa si falla
-        print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
-        print(f"DEBUG - Firma recibida: {received_signature}")
-        print(f"DEBUG - Firma calculada: {calculated_signature}")
-        print(f"DEBUG - Cuerpo recibido (crudo): {body_str.decode('utf-8')}")
-        print("--------------------------------------")
-        raise HTTPException(status_code=403, detail="Firma inválida")
-
-    if payment_data.get("payment_status") == "finished":
-        order_id = payment_data.get("order_id")
-        user_id = order_id.split('_')[0]
-        amount_paid = payment_data.get("actually_paid")
-
-        print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amoea las tablas si no existen."""
+    """Inicializa la conexión y crea las tablas si no existen."""
     global db_pool
     try:
         db_pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=50)
