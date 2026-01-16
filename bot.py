@@ -22,6 +22,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from fastapi import FastAPI, Request, HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # --- 1. CONFIGURACIÓN ---
 load_dotenv()
@@ -105,17 +106,23 @@ async def startup_event():
 @app.middleware("http")
 async def strip_user_agent_for_nowpayments(request: Request, call_next):
     if request.url.path == "/nowpayments/webhook":
+        # Guardar el cuerpo raw en el estado de la solicitud ANTES de procesarla
+        body = await request.body()
+        request.state.raw_body = body
+        
         mutable_headers = request.headers.mutablecopy()
         keys_to_delete = [key for key in mutable_headers.keys() if key.lower() == "user-agent"]
         for key in keys_to_delete:
             del mutable_headers[key]
-        
         new_scope = {**request.scope, "headers": mutable_headers.raw}
         request = Request(new_scope)
-
-    # Continúa con el siguiente middleware o la ruta final
-    response = await call_next(request)
-    return response
+        
+        # Continúa con el siguiente middleware o la ruta final
+        response = await call_next(request)
+        return response
+    else:
+        # Para otras rutas, simplemente continúa sin modificar
+        return await call_next(request)
 
 @app.post("/nowpayments/webhook")
 async def nowpayments_webhook(request: Request):
@@ -123,7 +130,9 @@ async def nowpayments_webhook(request: Request):
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
     
-    body = await request.body()
+    # Usar el cuerpo guardado en el estado en lugar de request.body()
+    body = request.state.raw_body
+    
     NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
     if not NOWPAYMENTS_IPN_SECRET:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
