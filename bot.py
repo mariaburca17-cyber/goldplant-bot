@@ -132,14 +132,13 @@ async def nowpayments_webhook(request: Request):
         payment_data = json.loads(body_str)
         
         # Según la documentación de NOWPayments, necesitamos ordenar las claves del JSON
-        # y eliminar todos los espacios y saltos de línea
+        # y usar exactamente el formato que ellos especifican
         sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
-        # Eliminar todos los espacios y saltos de línea
-        compact_body_str = sorted_body_str.replace(" ", "").replace("\n", "")
         
+        # La firma debe calcularse sobre el cuerpo JSON ordenado SIN modificar
         calculated_signature = hmac.new(
             NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-            compact_body_str.encode('utf-8'),
+            sorted_body_str.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         
@@ -149,40 +148,51 @@ async def nowpayments_webhook(request: Request):
             print(f"DEBUG - Firma calculada: {calculated_signature}")
             print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
             print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
-            print(f"DEBUG - Cuerpo compacto para hash: {compact_body_str}")
             print("--------------------------------------")
             raise HTTPException(status_code=403, detail="Firma inválida")
         
-        if payment_data.get("payment_status") == "finished":
+        # Procesamos el pago según su estado
+        payment_status = payment_data.get("payment_status")
+        print(f"Estado del pago: {payment_status}")
+        
+        if payment_status in ["finished", "confirmed"]:  # Aceptamos ambos estados
             order_id = payment_data.get("order_id")
             user_id = order_id.split('_')[0]
             amount_paid = payment_data.get("actually_paid")
-            print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
             
-            async def update_user_balance_in_db(user_id, amount):
-                global db_pool
-                async with db_pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                        amount, user_id
+            # Verificamos que el pago no sea cero
+            if float(amount_paid) > 0:
+                print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
+                
+                async def update_user_balance_in_db(user_id, amount):
+                    global db_pool
+                    async with db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                            amount, user_id
+                        )
+                        print(f"Balance actualizado para el usuario {user_id}: +${amount}")
+                
+                await update_user_balance_in_db(int(user_id), float(amount_paid))
+                
+                try:
+                    await bot.send_message(
+                        int(user_id),
+                        f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
                     )
-                    print(f"Balance actualizado para el usuario {user_id}: +${amount}")
-            
-            await update_user_balance_in_db(int(user_id), float(amount_paid))
-            
-            try:
-                await bot.send_message(
-                    int(user_id),
-                    f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
-                )
-            except Exception as e:
-                print(f"No se pudo notificar al usuario {user_id}: {e}")
+                except Exception as e:
+                    print(f"No se pudo notificar al usuario {user_id}: {e}")
+            else:
+                print(f"⚠️ Pago con monto cero para usuario {user_id}. No se actualiza el balance.")
             
             return Response(status_code=200)
+        else:
+            print(f"ℹ️ Pago en estado {payment_status}. No se procesa hasta que se complete.")
+            return Response(status_code=200)  # Respondemos con 200 para evitar reintentos
             
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
-
+        
 # --- 2. BASE DE DATOS (POSTGRESQL) ---
 async def init_db():
     """Inicializa la conexión y crea las tablas si no existen."""
