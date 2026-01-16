@@ -21,7 +21,7 @@ from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 # --- 1. CONFIGURACIÓN ---
@@ -119,49 +119,51 @@ async def nowpayments_webhook(request: Request):
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
-    
+
     # Usar el cuerpo guardado en el estado
     body = request.state.raw_body
-    
     NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
     if not NOWPAYMENTS_IPN_SECRET:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
-    
+
     try:
         # Convertir el cuerpo a string directamente sin procesar
         body_str = body.decode('utf-8')
         
-        # La firma debe calcularse sobre el cuerpo crudo sin modificar
+        # La firma debe calcularse sobre el cuerpo crudo concatenado con la clave IPN
+        # Este es el formato que NOWPayments espera
+        string_to_sign = body_str + NOWPAYMENTS_IPN_SECRET
+        
         calculated_signature = hmac.new(
-            NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-            body_str.encode('utf-8'),
+            string_to_sign.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
-        
+
         if not hmac.compare_digest(received_signature, calculated_signature):
             print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
             print(f"DEBUG - Firma recibida: {received_signature}")
             print(f"DEBUG - Firma calculada: {calculated_signature}")
             print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
+            print(f"DEBUG - String para firmar: {string_to_sign}")
             print("--------------------------------------")
             raise HTTPException(status_code=403, detail="Firma inválida")
-        
+
         # Parsear el JSON después de verificar la firma
         payment_data = json.loads(body_str)
-        
+
         # Procesamos el pago según su estado
         payment_status = payment_data.get("payment_status")
         print(f"Estado del pago: {payment_status}")
-        
+
         if payment_status in ["finished", "confirmed"]:  # Aceptamos ambos estados
             order_id = payment_data.get("order_id")
             user_id = order_id.split('_')[0]
             amount_paid = payment_data.get("actually_paid")
-            
+
             # Verificamos que el pago no sea cero
             if float(amount_paid) > 0:
                 print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
-                
+
                 async def update_user_balance_in_db(user_id, amount):
                     global db_pool
                     async with db_pool.acquire() as conn:
@@ -170,9 +172,9 @@ async def nowpayments_webhook(request: Request):
                             amount, user_id
                         )
                         print(f"Balance actualizado para el usuario {user_id}: +${amount}")
-                
+
                 await update_user_balance_in_db(int(user_id), float(amount_paid))
-                
+
                 try:
                     await bot.send_message(
                         int(user_id),
@@ -182,12 +184,12 @@ async def nowpayments_webhook(request: Request):
                     print(f"No se pudo notificar al usuario {user_id}: {e}")
             else:
                 print(f"⚠️ Pago con monto cero para usuario {user_id}. No se actualiza el balance.")
-            
+
             return Response(status_code=200)
         else:
             print(f"ℹ️ Pago en estado {payment_status}. No se procesa hasta que se complete.")
             return Response(status_code=200)  # Respondemos con 200 para evitar reintentos
-            
+
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
 
