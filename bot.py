@@ -135,8 +135,9 @@ async def nowpayments_webhook(request: Request):
         string_to_sign = body_str + NOWPAYMENTS_IPN_SECRET
         
         calculated_signature = hmac.new(
-            string_to_sign.encode('utf-8'),
-            hashlib.sha256
+            key="sGLMvdw4GMMuANZfD651sI/SF8uHjF2L".encode(),  # Tu clave IPN secreta real
+            msg=body,  # El cuerpo de la solicitud
+            digestmod=hashlib.sha256  # Este es el parámetro que faltaba
         ).hexdigest()
 
         if not hmac.compare_digest(received_signature, calculated_signature):
