@@ -118,7 +118,32 @@ async def strip_user_agent_for_nowpayments(request: Request, call_next):
     return response
 
 
-@app.post("/nowpayments/webhook")
+unt_paid}")
+
+        async def update_user_balance_in_db(user_id, amount):
+            global db_pool
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
+                    amount, user_id
+                )
+                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
+
+        await update_user_balance_in_db(int(user_id), float(amount_paid))
+
+        try:
+            await bot.send_message(
+                int(user_id),
+                f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
+            )
+        except Exception as e:
+            print(f"No se pudo notificar al usuario {user_id}: {e}")
+
+    return Response(status_code=200)
+
+# --- 2. BASE DE DATOS (POSTGRESQL) ---
+async def init_db():
+    """Inicializa la conexión y cr@app.post("/nowpayments/webhook")
 async def nowpayments_webhook(request: Request):
     # 1. Obtener el cuerpo crudo de la petición como texto
     body_str = await request.body()
@@ -150,43 +175,12 @@ async def nowpayments_webhook(request: Request):
         print("--------------------------------------")
         raise HTTPException(status_code=403, detail="Firma inválida")
 
-    # 6. Si la firma es válida, procesar el JSON
-    try:
-        payment_data = await request.json()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail="JSON inválido")
-
     if payment_data.get("payment_status") == "finished":
         order_id = payment_data.get("order_id")
         user_id = order_id.split('_')[0]
         amount_paid = payment_data.get("actually_paid")
 
-        print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amount_paid}")
-
-        async def update_user_balance_in_db(user_id, amount):
-            global db_pool
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
-                    amount, user_id
-                )
-                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
-
-        await update_user_balance_in_db(int(user_id), float(amount_paid))
-
-        try:
-            await bot.send_message(
-                int(user_id),
-                f"✅ ¡Pago recibido!\n\nSe han añadido ${amount_paid:.2f} a tu balance. Gracias por tu recarga."
-            )
-        except Exception as e:
-            print(f"No se pudo notificar al usuario {user_id}: {e}")
-
-    return Response(status_code=200)
-
-# --- 2. BASE DE DATOS (POSTGRESQL) ---
-async def init_db():
-    """Inicializa la conexión y crea las tablas si no existen."""
+        print(f"✅ Pago confirmado para usuario {user_id}. Cantidad: {amoea las tablas si no existen."""
     global db_pool
     try:
         db_pool = await asyncpg.create_pool(DB_URL, min_size=5, max_size=50)
