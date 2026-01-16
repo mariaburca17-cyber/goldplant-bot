@@ -126,8 +126,8 @@ async def nowpayments_webhook(request: Request):
 
     body = await request.body()
 
-    ipn_secret = os.getenv("NOWPAYMENTS_IPN_KEY")
-    if not ipn_secret:
+    NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
+    if not NOWPAYMENTS_IPN_SECRET:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
     try:
@@ -137,7 +137,7 @@ async def nowpayments_webhook(request: Request):
         sorted_body_bytes = sorted_body_str.encode('utf-8')
 
         calculated_signature = hmac.new(
-            ipn_secret.encode('utf-8'),
+            NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
             sorted_body_bytes,
             hashlib.sha256
         ).hexdigest()
