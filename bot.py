@@ -581,7 +581,7 @@ async def about_goldplant(message: types.Message):
         "🌳Buy a tree🌳: Invest your balance to plant your first tree.\n"
         "💧Water your tree💧: Every 24 hours you can water it to keep it growing and generating earnings.\n"
         "💰Get earnings💰: Your tree produces a daily return (ROI) based on its type and size.\n"
-        "💳Deposits💳: Deposits are made by paying with card to recharge your balance.\n"
+        "💳Deposits💳: Deposits are made by paying with cryptocurrency to recharge your balance.\n"
         "💸Withdrawals💸: The minimum withdrawal amount is $50. To request it, you must enter the 16 digits of your card and the name and surname of the holder.\n"
         "👥Referral system👥: Invite your friends with your unique link and earn 10% of their tree purchases**. More friends, more earnings! 🧑‍🤝‍🧑\n\n"
         "💯Transparency and security💯:\n\n"
