@@ -131,10 +131,14 @@ async def nowpayments_webhook(request: Request):
         body_str = body.decode('utf-8')
         payment_data = json.loads(body_str)
         
-        # No ordenamos el JSON, usamos el cuerpo exacto como lo recibimos
+        # Según la documentación de NOWPayments, necesitamos ordenar las claves del JSON
+        # y usar separadores específicos para calcular la firma
+        sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
+        sorted_body_bytes = sorted_body_str.encode('utf-8')
+        
         calculated_signature = hmac.new(
             NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-            body,
+            sorted_body_bytes,
             hashlib.sha256
         ).hexdigest()
         
@@ -143,6 +147,7 @@ async def nowpayments_webhook(request: Request):
             print(f"DEBUG - Firma recibida: {received_signature}")
             print(f"DEBUG - Firma calculada: {calculated_signature}")
             print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
+            print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
             print("--------------------------------------")
             raise HTTPException(status_code=403, detail="Firma inválida")
         
@@ -159,7 +164,7 @@ async def nowpayments_webhook(request: Request):
                         "UPDATE users SET balance = balance + $1 WHERE user_id = $2",
                         amount, user_id
                     )
-                print(f"Balance actualizado para el usuario {user_id}: +${amount}")
+                    print(f"Balance actualizado para el usuario {user_id}: +${amount}")
             
             await update_user_balance_in_db(int(user_id), float(amount_paid))
             
@@ -170,9 +175,9 @@ async def nowpayments_webhook(request: Request):
                 )
             except Exception as e:
                 print(f"No se pudo notificar al usuario {user_id}: {e}")
-        
-        return Response(status_code=200)
-        
+            
+            return Response(status_code=200)
+            
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
 
