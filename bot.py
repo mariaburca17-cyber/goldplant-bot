@@ -106,7 +106,7 @@ async def startup_event():
 @app.middleware("http")
 async def strip_user_agent_for_nowpayments(request: Request, call_next):
     if request.url.path == "/nowpayments/webhook":
-        # Guardar el cuerpo raw en el estado de la solicitud ANTES de procesarla
+        # Guardar el cuerpo raw en el estado de la solicitud ANTES de modificar los headers
         body = await request.body()
         request.state.raw_body = body
         
@@ -114,7 +114,13 @@ async def strip_user_agent_for_nowpayments(request: Request, call_next):
         keys_to_delete = [key for key in mutable_headers.keys() if key.lower() == "user-agent"]
         for key in keys_to_delete:
             del mutable_headers[key]
-        new_scope = {**request.scope, "headers": mutable_headers.raw}
+        
+        # Importante: necesitamos crear un nuevo Request con el cuerpo original
+        new_scope = {
+            **request.scope, 
+            "headers": mutable_headers.raw,
+            "body": body  # Aseguramos que el cuerpo se mantenga
+        }
         request = Request(new_scope)
         
         # Continúa con el siguiente middleware o la ruta final
