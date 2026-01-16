@@ -120,39 +120,41 @@ async def strip_user_agent_for_nowpayments(request: Request, call_next):
 
 @app.post("/nowpayments/webhook")
 async def nowpayments_webhook(request: Request):
+    # 1. Obtener el cuerpo crudo de la petición como texto
+    body_str = await request.body()
+    
+    # 2. Obtener la firma enviada por NOWPayments
     received_signature = request.headers.get("x-nowpayments-sig")
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    body = await request.body()
-
-    NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
+    # 3. Obtener la clave secreta (ya con el nombre corregido)
+    NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET") # O el nombre que hayas decidido usar
     if not NOWPAYMENTS_IPN_SECRET:
         raise HTTPException(status_code=500, detail="Clave IPN no configurada en el servidor")
 
-    try:
-        body_str = body.decode('utf-8')
-        payment_data = json.loads(body_str)
-        sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
-        sorted_body_bytes = sorted_body_str.encode('utf-8')
+    # 4. Calcular la firma usando el cuerpo crudo
+    calculated_signature = hmac.new(
+        NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
+        body_str,  # <-- ¡EL CAMBIO CLAVE! Usar el cuerpo crudo directamente
+        hashlib.sha256
+    ).hexdigest()
 
-        calculated_signature = hmac.new(
-            NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-            sorted_body_bytes,
-            hashlib.sha256
-        ).hexdigest()
-
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise HTTPException(status_code=400, detail="Cuerpo de la petición inválido")
-
+    # 5. Comparar las firmas
     if not hmac.compare_digest(received_signature, calculated_signature):
+        # Tu debug sigue siendo útil para ver qué pasa si falla
         print("--- ERROR DE VERIFICACIÓN DE FIRMA ---")
         print(f"DEBUG - Firma recibida: {received_signature}")
         print(f"DEBUG - Firma calculada: {calculated_signature}")
-        print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
-        print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
+        print(f"DEBUG - Cuerpo recibido (crudo): {body_str.decode('utf-8')}")
         print("--------------------------------------")
         raise HTTPException(status_code=403, detail="Firma inválida")
+
+    # 6. Si la firma es válida, procesar el JSON
+    try:
+        payment_data = await request.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="JSON inválido")
 
     if payment_data.get("payment_status") == "finished":
         order_id = payment_data.get("order_id")
