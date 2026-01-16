@@ -106,15 +106,12 @@ async def startup_event():
 @app.middleware("http")
 async def strip_user_agent_for_nowpayments(request: Request, call_next):
     if request.url.path == "/nowpayments/webhook":
-        # Solo guardamos el cuerpo raw en el estado de la solicitud
+        # Guardamos el cuerpo raw sin modificar
         body = await request.body()
         request.state.raw_body = body
-        
-        # Continúa con el siguiente middleware o la ruta final sin modificar headers
         response = await call_next(request)
         return response
     else:
-        # Para otras rutas, simplemente continúa sin modificar
         return await call_next(request)
 
 @app.post("/nowpayments/webhook")
@@ -123,7 +120,7 @@ async def nowpayments_webhook(request: Request):
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
     
-    # Usar el cuerpo guardado en el estado en lugar de request.body()
+    # Usar el cuerpo guardado en el estado
     body = request.state.raw_body
     
     NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
@@ -133,11 +130,11 @@ async def nowpayments_webhook(request: Request):
     try:
         body_str = body.decode('utf-8')
         payment_data = json.loads(body_str)
-        sorted_body_str = json.dumps(payment_data, sort_keys=True, separators=(',', ':'))
-        sorted_body_bytes = sorted_body_str.encode('utf-8')
+        
+        # No ordenamos el JSON, usamos el cuerpo exacto como lo recibimos
         calculated_signature = hmac.new(
             NOWPAYMENTS_IPN_SECRET.encode('utf-8'),
-            sorted_body_bytes,
+            body,
             hashlib.sha256
         ).hexdigest()
         
@@ -146,7 +143,6 @@ async def nowpayments_webhook(request: Request):
             print(f"DEBUG - Firma recibida: {received_signature}")
             print(f"DEBUG - Firma calculada: {calculated_signature}")
             print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
-            print(f"DEBUG - Cuerpo ordenado para hash: {sorted_body_str}")
             print("--------------------------------------")
             raise HTTPException(status_code=403, detail="Firma inválida")
         
