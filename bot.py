@@ -130,12 +130,12 @@ async def nowpayments_webhook(request: Request):
         # Convertir el cuerpo a string
         body_str = body.decode('utf-8')
         
-        # Calcular la firma correctamente con SHA-512
-        string_to_sign = body_str + NOWPAYMENTS_IPN_SECRET
+        # Calcular la firma correctamente según la documentación
+        # La firma debe calcularse solo sobre el JSON, sin concatenar la clave
         calculated_signature = hmac.new(
             key=NOWPAYMENTS_IPN_SECRET.encode(),
-            msg=string_to_sign.encode(),
-            digestmod=hashlib.sha512  # <-- CAMBIO A SHA-512
+            msg=body_str.encode(),  # Solo el cuerpo JSON, sin concatenar la clave
+            digestmod=hashlib.sha512
         ).hexdigest()
 
         if not hmac.compare_digest(received_signature, calculated_signature):
@@ -143,7 +143,6 @@ async def nowpayments_webhook(request: Request):
             print(f"DEBUG - Firma recibida: {received_signature}")
             print(f"DEBUG - Firma calculada: {calculated_signature}")
             print(f"DEBUG - Cuerpo recibido (crudo): {body_str}")
-            print(f"DEBUG - String para firmar: {string_to_sign}")
             print("--------------------------------------")
             raise HTTPException(status_code=403, detail="Firma inválida")
 
