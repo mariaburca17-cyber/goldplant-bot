@@ -124,7 +124,7 @@ async def nowpayments_webhook(request: Request):
     if not received_signature:
         raise HTTPException(status_code=403, detail="Firma no proporcionada")
 
-    body = await request.body()
+    body = request.state.raw_body
 
     NOWPAYMENTS_IPN_SECRET = os.getenv("NOWPAYMENTS_IPN_SECRET")
     if not NOWPAYMENTS_IPN_SECRET:
