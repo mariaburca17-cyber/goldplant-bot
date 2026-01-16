@@ -792,8 +792,7 @@ async def handle_menu(message: types.Message, state: FSMContext):
         )
         
         await message.answer(
-            "💳 Please write the amount of USD you want to add to your balance (e.g., 10, 25, 50):\n\n"
-            "✍️ Simply send me the number as a message.\n\n"
+            "✍️  Please write the amount of USD you want to add to your balance \n\n"
             "Or press the button to cancel.",
             reply_markup=cancel_keyboard
         )
