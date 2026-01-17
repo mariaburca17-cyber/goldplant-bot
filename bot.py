@@ -100,11 +100,10 @@ async def startup_event():
     
     print("✅ Startup event completed. The server is ready to receive requests.")
 
-# Endpoint para Keep-Alive
-@app.get("/ping")
-async def ping():
-    """Endpoint para mantener el bot activo (Keep-Alive)"""
-    return {"status": "active", "timestamp": datetime.now().isoformat()}
+@app.get("/")
+async def root():
+    """Endpoint raíz para mantener el bot activo"""
+    return {"status": "active"}
     
 # --- Final corrected middleware for the NOWPayments Webhook ---
 @app.middleware("http")
