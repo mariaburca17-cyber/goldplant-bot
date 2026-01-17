@@ -101,10 +101,11 @@ async def startup_event():
     print("✅ Startup event completed. The server is ready to receive requests.")
 
 @app.get("/")
+@app.head("/") 
 async def root():
     """Endpoint raíz para mantener el bot activo"""
     return {"status": "active"}
-    
+
 # --- Final corrected middleware for the NOWPayments Webhook ---
 @app.middleware("http")
 async def strip_user_agent_for_nowpayments(request: Request, call_next):
